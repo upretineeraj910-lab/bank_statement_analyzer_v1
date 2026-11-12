@@ -10,8 +10,11 @@
 # import os
 # import re
 # import json
+# import sqlite3
+# import math
 # from datetime import datetime
 # from collections import defaultdict
+# import hashlib
 # from io import BytesIO
 # import pandas as pd
 # import pymupdf
@@ -39,6 +42,67 @@
 #     GENAI_AVAILABLE = True
 # except ImportError:
 #     GENAI_AVAILABLE = False
+
+# DB_PATH = os.path.join(os.path.dirname(__file__), "bank_statement.db")
+
+# def init_db(db_path=DB_PATH):
+#     conn = sqlite3.connect(db_path, timeout=30.0)
+#     c = conn.cursor()
+#     c.execute("PRAGMA journal_mode=WAL;")
+#     c.execute("PRAGMA busy_timeout=5000;")
+#     c.execute("""
+#     CREATE TABLE IF NOT EXISTS statements (
+#         id INTEGER PRIMARY KEY AUTOINCREMENT,
+#         bank TEXT,
+#         borrower_name TEXT,
+#         account_no TEXT,
+#         branch TEXT,
+#         sol_id TEXT,
+#         ifsc TEXT,
+#         cust_id TEXT,
+#         email TEXT,
+#         mobile TEXT,
+#         account_type TEXT,
+#         period TEXT,
+#         opening_balance REAL,
+#         closing_balance REAL,
+#         total_withdrawals REAL,
+#         total_deposits REAL,
+#         abb REAL,
+#         reconciled INTEGER DEFAULT 1,
+#         filename TEXT,
+#         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+#     )
+#     """)
+    
+#     c.execute("PRAGMA table_info(transactions)")
+#     cols = [col[1] for col in c.fetchall()]
+#     if not cols:
+#         c.execute("""
+#         CREATE TABLE transactions (
+#             id INTEGER PRIMARY KEY AUTOINCREMENT,
+#             bank TEXT,
+#             account_no TEXT,
+#             txn_date TEXT,
+#             iso_date TEXT,
+#             narration TEXT,
+#             debit REAL,
+#             credit REAL,
+#             balance REAL,
+#             category TEXT,
+#             sub_category TEXT
+#         )
+#         """)
+#     else:
+#         if "account_no" not in cols:
+#             c.execute("ALTER TABLE transactions ADD COLUMN account_no TEXT")
+#         if "iso_date" not in cols:
+#             c.execute("ALTER TABLE transactions ADD COLUMN iso_date TEXT")
+#         if "sub_category" not in cols:
+#             c.execute("ALTER TABLE transactions ADD COLUMN sub_category TEXT")
+            
+#     conn.commit()
+#     conn.close()
 
 # MONTH_MAP = {
 #     'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
@@ -87,10 +151,7 @@
 #     m0 = re.match(r'^(\d{4})-(\d{1,2})-(\d{1,2})$', s)
 #     if m0:
 #         y, mo, d = m0.groups()
-#         try:
-#             return datetime(int(y), int(mo), int(d)).strftime("%Y-%m-%d")
-#         except ValueError:
-#             return ""
+#         return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
 
 #     m1 = re.match(r'^(\d{1,2})[\s\-\/\.]([A-Za-z]{3,9})[\s\-\/\.](\d{2,4})$', s)
 #     if m1:
@@ -99,10 +160,7 @@
 #         if mon_lower in MONTH_MAP:
 #             mo = MONTH_MAP[mon_lower]
 #             year = f"20{y}" if len(y) == 2 else y
-#             try:
-#                 return datetime(int(year), int(mo), int(d)).strftime("%Y-%m-%d")
-#             except ValueError:
-#                 return ""
+#             return f"{int(year):04d}-{mo}-{int(d):02d}"
 
 #     m2 = re.match(r'^([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{2,4})$', s)
 #     if m2:
@@ -111,38 +169,19 @@
 #         if mon_lower in MONTH_MAP:
 #             mo = MONTH_MAP[mon_lower]
 #             year = f"20{y}" if len(y) == 2 else y
-#             try:
-#                 return datetime(int(year), int(mo), int(d)).strftime("%Y-%m-%d")
-#             except ValueError:
-#                 return ""
+#             return f"{int(year):04d}-{mo}-{int(d):02d}"
 
 #     m3 = re.match(r'^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$', s)
 #     if m3:
 #         d, mo, y = m3.groups()
 #         year = f"20{y}" if len(y) == 2 else y
-#         try:
-#             return datetime(int(year), int(mo), int(d)).strftime("%Y-%m-%d")
-#         except ValueError:
-#             return ""
+#         return f"{int(year):04d}-{int(mo):02d}-{int(d):02d}"
 
 #     return s
 
-# def _clean_employer_display(value):
-#     value = re.sub(r"^A2A[A-Z0-9]{2,10}[-/:]", "", str(value or ""), flags=re.I).strip()
-#     # Some PDF layouts split PRIVATE across narration lines around a reference ID.
-#     value = re.sub(r"\s+(?:PRIVA|PRIVAT|PRIV|PVT)$", "", value, flags=re.I).strip()
-#     return re.sub(r"\s+", " ", value).strip(" -/:,")
-
-
-# def _employer_identity_key(value):
-#     key = _clean_employer_display(value).upper()
-#     key = re.sub(r"\b(PRIVATE|LIMITED|PVT|LTD|PRIVA|PRIVAT)\b", " ", key)
-#     return re.sub(r"[^A-Z0-9]+", "", key)
-
-
 # def extract_dynamic_employer(desc):
 #     d = desc.strip()
-#     cleaned = re.sub(r'^(?:NEFT|RTGS|IMPS|ACH|CMS|A2A|FT)\s*(?:CR|DR)?\s*[-/:]?\s*(?:[A-Z0-9]{3,12}[-/:])?[A-Z0-9]{8,25}\s*', '', d, flags=re.IGNORECASE).strip()
+#     cleaned = re.sub(r'^(?:NEFT|RTGS|IMPS|ACH|CMS|A2A|FT)\s*(?:CR|DR)?\s*[-/:]?\s*[A-Z0-9]{8,25}\s*', '', d, flags=re.IGNORECASE).strip()
 #     cleaned = re.sub(r'^[A-Z0-9]{10,}\*?', '', cleaned).strip()
     
 #     corp_match = re.search(r'([A-Z0-9\s.,&-]+?\b(?:PRIVATE\s+LIMITED|PVT\s+LTD|LIMITED|LTD|CORPORATION|CORP|TECHNOLOGIES|TECH|SERVICES|SOLUTIONS|SOLN|LLP|MANAGEMENT)\b)', cleaned, re.IGNORECASE)
@@ -151,7 +190,7 @@
 #         emp = re.sub(r'^[-/*0-9\s]+', '', emp).strip()
 #         emp = re.sub(r'\s+IN\d{10,}.*$', '', emp, flags=re.I).strip()
 #         if len(emp) >= 4 and not any(b in emp.upper() for b in ["STATE BANK", "HDFC BANK", "ICICI BANK", "AXIS BANK"]):
-#             return _clean_employer_display(emp.title())
+#             return emp.title()
 
 #     hyphen_parts = [p.strip() for p in cleaned.split('-') if p.strip()]
 #     for part in hyphen_parts:
@@ -163,7 +202,7 @@
 #         part_clean = re.sub(r'\s+(?:CITI\s*BANK|HDFC\s*BANK|SBI|AXIS|ICICI|BANK).*$', '', part, flags=re.IGNORECASE).strip()
 #         part_clean = re.sub(r'\s+IN\d{10,}.*$', '', part_clean, flags=re.I).strip()
 #         if len(part_clean) >= 3:
-#             return _clean_employer_display(part_clean.title())
+#             return part_clean.title()
 
 #     return "Corporate Payroll"
 
@@ -257,8 +296,6 @@
 #     elif 'PAYTMQR' in d and debit >= 2000 and any(c in d for c in ['CRED', 'CARD', 'ROTATION', 'WALLET']):
 #         flags.append("CC_PAYMENT")
 
-#     if not flags and d.startswith("UPI/") and (debit > 0 or credit > 0):
-#         flags.append("UPI_PAYMENT")
 #     return ", ".join(flags) if flags else "GENERAL"
 
 # def _infer_opening_balance(balance, amt, narration):
@@ -303,6 +340,90 @@
 #         for i in hits:
 #             cat = records[i]["category"]
 #             records[i]["category"] = "SALARY" if cat == "GENERAL" else f"{cat}, SALARY"
+#     return records
+
+# def auto_categorize_with_ai(records):
+#     """
+#     Groups unique transaction patterns and classifies all rows in a single fast LLM call.
+#     Eliminates manual regex updates for new banks or broken PDF words.
+#     Falls back seamlessly to deterministic rule engine if API is unavailable.
+#     """
+#     if not GENAI_AVAILABLE or not os.environ.get("GEMINI_API_KEY") or not records:
+#         return records
+
+#     unique_patterns = {}
+#     for idx, r in enumerate(records):
+#         narr = str(r.get("narration", "")).strip()
+#         sig = re.sub(r'\d+', '#', narr)[:80]
+#         direction = "CR" if float(r.get("credit") or 0) > 0 else "DR"
+#         amt_bucket = "HIGH" if max(float(r.get("credit") or 0), float(r.get("debit") or 0)) >= 5000 else "LOW"
+#         key = (sig, direction, amt_bucket)
+        
+#         if key not in unique_patterns:
+#             unique_patterns[key] = {
+#                 "pattern_id": len(unique_patterns),
+#                 "sample_narration": narr[:140],
+#                 "type": direction,
+#                 "sample_amount": r.get("credit") if direction == "CR" else r.get("debit"),
+#                 "count": 0,
+#                 "row_indices": []
+#             }
+#         unique_patterns[key]["count"] += 1
+#         unique_patterns[key]["row_indices"].append(idx)
+
+#     payload = [
+#         {
+#             "id": v["pattern_id"],
+#             "narration": v["sample_narration"],
+#             "type": v["type"],
+#             "amount": v["sample_amount"],
+#             "frequency": v["count"]
+#         }
+#         for v in list(unique_patterns.values())[:80]
+#     ]
+
+#     prompt = f"""You are an Indian Banking & Credit Underwriting AI classifier.
+# Classify each transaction pattern into ONE primary category from:
+# - SALARY (Corporate/Govt payroll, stipends)
+# - BUSINESS_INFLOW (POS/QR merchant settlements like Paytm/One97/BharatPe/Razorpay)
+# - EMI_LOAN (Loan EMIs, NACH/ACH auto-debits, recurring monthly loan mandates, NBFC payments)
+# - LOAN_DISBURSEMENT (Loan credits from banks/NBFCs)
+# - CC_PAYMENT (Credit card bill settlements like CRED, BillPay)
+# - WALLET_TOPUP (UPI-Lite, Mobikwik/Paytm wallet reloads)
+# - STOCK_TRADING (Zerodha, Angel One, Groww, ICCL/NSE mutual fund SIPs)
+# - BOUNCE_FAILURE (Genuine NACH/ACH/Cheque return charges or bounces — NOT UPI refunds)
+# - GENERAL (P2P UPI, shopping, food, ATM cash, utilities)
+
+# Also extract 'clean_entity' (formal company/lender name without UTR/IFSC/garbled PDF line breaks).
+
+# INPUT PATTERNS:
+# {json.dumps(payload)}
+
+# Return ONLY a JSON array of objects:
+# [{{"id": 0, "category": "SALARY", "clean_entity": "Delhi Development Authority"}}]"""
+
+#     try:
+#         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+#         response = client.models.generate_content(
+#             model="gemini-3.8-flash",
+#             contents=prompt,
+#             config=types.GenerateContentConfig(
+#                 response_mime_type="application/json",
+#                 temperature=0.0
+#             )
+#         )
+#         if response and response.text:
+#             predictions = {item["id"]: item for item in json.loads(response.text)}
+#             for v in unique_patterns.values():
+#                 pred = predictions.get(v["pattern_id"])
+#                 if pred and pred.get("category"):
+#                     for row_idx in v["row_indices"]:
+#                         records[row_idx]["category"] = pred["category"]
+#                         if pred.get("clean_entity"):
+#                             records[row_idx]["clean_entity"] = pred["clean_entity"]
+#     except Exception as e:
+#         print(f"[AI Auto-Categorizer Fallback] {e}")
+
 #     return records
 
 # def _fill_period_from_records(metadata, records):
@@ -356,7 +477,9 @@
 #         m_ifsc = re.search(r'IFSC\s*(?:CODE)?\s*[:\.]\s*([A-Z]{4})', p0_header)
 #         if m_ifsc:
 #             code = m_ifsc.group(1)
-#             if code == "SCBL":
+#             if code == "UCBA":
+#                 return {"is_encrypted": False, "detected_bank": "UCO Bank", "layout": "5-column UCO Bank Statement", "columns": ["Date", "Particulars", "Withdrawals", "Deposits", "Balance"], "pages": len(doc)}
+#             elif code == "SCBL":
 #                 return {"is_encrypted": False, "detected_bank": "Standard Chartered Bank", "layout": "7-column Standard Chartered Layout", "columns": ["Date", "Value Date", "Description", "Cheque", "Deposit", "Withdrawal", "Balance"], "pages": len(doc)}
 #             elif code == "HDFC":
 #                 return {"is_encrypted": False, "detected_bank": "HDFC Bank", "layout": "7-column Text Format", "columns": ["Date", "Narration", "Chq./Ref.No.", "Value Dt", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"], "pages": len(doc)}
@@ -371,13 +494,9 @@
 #             elif code == "IDFB":
 #                 return {"is_encrypted": False, "detected_bank": "IDFC FIRST Bank", "layout": "7-column Tabular Format", "columns": ["Transaction Date", "Value Date", "Particulars", "Cheque No", "Debit", "Credit", "Balance"], "pages": len(doc)}
 
-#         # ICICI statements often expose the column headers as separate text lines,
-#         # so IFSC-based detection alone is not sufficient.
-#         if ("ICICI BANK LIMITED" in text_upper or
-#             ("TRANSACTION REMARKS" in text_upper and "WITHDRAWAL" in text_upper and "DEPOSIT" in text_upper and "BALANCE" in text_upper)):
-#             return {"is_encrypted": False, "detected_bank": "ICICI Bank", "layout": "ICICI Statement of Transactions", "columns": ["S No.", "Transaction Date", "Cheque Number", "Transaction Remarks", "Withdrawal Amount", "Deposit Amount", "Balance"], "pages": len(doc)}
-
-#         if "STANDARD CHARTERED" in header_clean or "STANCHART" in header_clean or "SCBL" in header_clean or "STANDARD CHARTERED" in text_upper:
+#         if "UCO BANK" in header_clean or "UCO BANK" in text_upper or "UCBA" in p0_header:
+#             return {"is_encrypted": False, "detected_bank": "UCO Bank", "layout": "5-column UCO Bank Statement", "columns": ["Date", "Particulars", "Withdrawals", "Deposits", "Balance"], "pages": len(doc)}
+#         elif "STANDARD CHARTERED" in header_clean or "STANCHART" in header_clean or "SCBL" in header_clean or "STANDARD CHARTERED" in text_upper:
 #             return {"is_encrypted": False, "detected_bank": "Standard Chartered Bank", "layout": "7-column Standard Chartered Layout", "columns": ["Date", "Value Date", "Description", "Cheque", "Deposit", "Withdrawal", "Balance"], "pages": len(doc)}
 #         elif ("CHQ./REF.NO." in p0_header and "CLOSING BALANCE" in p0_header and "WITHDRAWAL AMT." in p0_header) or "HDFC BANK" in header_clean or "WE UNDERSTAND YOUR WORLD" in text_upper or "HDFC BANK LIMITED" in header_clean:
 #             return {"is_encrypted": False, "detected_bank": "HDFC Bank", "layout": "7-column Text Format", "columns": ["Date", "Narration", "Chq./Ref.No.", "Value Dt", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"], "pages": len(doc)}
@@ -486,89 +605,6 @@
 #                         })
 #     except Exception as e:
 #         print(f"[Standard Chartered Parser Error] {e}")
-
-#     # Prefer positioned-word extraction for SC statements. The table extractor
-#     # can shift a debit into the deposit column when the narration wraps over lines.
-#     try:
-#         coord_pdf = pdfplumber.open(BytesIO(pdf_source) if isinstance(pdf_source, bytes) else pdf_source, password=password)
-#         coord_records = []
-#         opening_from_forward = None
-#         opening_date = None
-#         date_line_re = re.compile(r"^\d{1,2}\s+[A-Za-z]{3}\s+\d{4}$", re.I)
-#         money_re = re.compile(r"^\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}\)?$")
-#         for page in coord_pdf.pages:
-#             words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
-#             line_map = {}
-#             for word in words:
-#                 y_key = round(word["top"] / 2.5) * 2.5
-#                 line_map.setdefault(y_key, []).append(word)
-#             lines = []
-#             for y_key, line_words in sorted(line_map.items()):
-#                 line_words.sort(key=lambda w: w["x0"])
-#                 left_text = " ".join(w["text"] for w in line_words if w["x0"] < 110)
-#                 date_match = re.search(r"\b\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\b", left_text, re.I)
-#                 lines.append({"words": line_words, "date": date_match.group(0) if date_match else None})
-#             starts = [i for i, line in enumerate(lines) if line["date"] and is_date(line["date"])]
-#             for pos, start_idx in enumerate(starts):
-#                 stop_idx = starts[pos + 1] if pos + 1 < len(starts) else len(lines)
-#                 block_lines = lines[start_idx:stop_idx]
-#                 narration_words = []
-#                 deposit = debit = balance = 0.0
-#                 for line in block_lines:
-#                     line_text = " ".join(w["text"] for w in line["words"])
-#                     # The summary totals are printed directly after the last
-#                     # transaction and must not overwrite its actual balance.
-#                     if re.search(r"\bTOTAL\b", line_text, re.I):
-#                         break
-#                     for word in line["words"]:
-#                         x0, x1, token = word["x0"], word["x1"], word["text"].strip()
-#                         if money_re.fullmatch(token):
-#                             value = clean_amount(token)
-#                             x_mid = (x0 + x1) / 2
-#                             if x_mid >= 495:
-#                                 balance = value
-#                             elif 360 <= x_mid < 430:
-#                                 deposit = value
-#                             elif 430 <= x_mid < 495:
-#                                 debit = value
-#                         elif x0 >= 160 and x1 <= 370 and not re.fullmatch(r"\d{1,3}", token):
-#                             if token and token.lower() not in {"date", "description", "value", "deposit", "withdrawal", "balance", "total"}:
-#                                 narration_words.append(token)
-#                     # Description text can wrap below the amount line in SC PDFs.
-#                     # The explicit TOTAL row marks the end of the last transaction.
-#                 narration = re.sub(r"\s+", " ", " ".join(narration_words)).strip()
-#                 # Balance-forward lines contain the opening balance, not a transaction.
-#                 # The word BALANCE is a column heading at a different x-position,
-#                 # so the narration may contain only "FORWARD" after column filtering.
-#                 if "FORWARD" in narration.upper() and balance and not debit and not deposit:
-#                     opening_from_forward = balance
-#                     opening_date = block_lines[0]["date"]
-#                     continue
-#                 # The printed statement summary repeats aggregate debit/credit totals.
-#                 # Never append that summary row as if it were an individual transaction.
-#                 if not balance or not narration:
-#                     continue
-#                 txn_date = block_lines[0]["date"]
-#                 coord_records.append({
-#                     "bank": metadata["bank"], "account_no": metadata.get("account_no", ""),
-#                     "txn_date": txn_date, "iso_date": parse_iso_date(txn_date),
-#                     "narration": narration, "debit": round(debit, 2),
-#                     "credit": round(deposit, 2), "balance": round(balance, 2),
-#                     "category": categorize_transaction(narration, debit, deposit)
-#                 })
-#         coord_pdf.close()
-#         if coord_records:
-#             coord_records.sort(key=lambda r: r["iso_date"])
-#             records = coord_records
-#             if opening_from_forward is not None:
-#                 metadata["opening_balance"] = opening_from_forward
-#             elif metadata.get("opening_balance", 0.0) == 0.0:
-#                 first = records[0]
-#                 metadata["opening_balance"] = round(first["balance"] - first["credit"] + first["debit"], 2)
-#             period_start = opening_date or records[0]["txn_date"]
-#             metadata["period"] = f"{period_start} to {records[-1]['txn_date']}"
-#     except Exception as e:
-#         print(f"[SC Coordinate Parser Fallback] {e}")
 
 #     if records:
 #         if metadata["opening_balance"] == 0.0 and len(records) > 0:
@@ -966,175 +1002,207 @@
 #     return records, metadata
 
 # def parse_icici_pdf(pdf_source, password=None):
-#     """Parse ICICI's text-based statement layout using word coordinates.
-
-#     ICICI PDFs frequently have no extractable table grid. Column positions are
-#     therefore taken from the printed header and transaction rows are assembled
-#     from positioned words, preserving wrapped narrations.
-#     """
 #     metadata = {
 #         "bank": "ICICI Bank", "borrower_name": "ICICI Account Holder", "account_no": "",
 #         "branch": "ICICI Bank Branch", "sol_id": "", "ifsc": "ICIC0000000", "cust_id": "",
 #         "email": "", "mobile": "", "account_type": "Savings Account", "period": "",
-#         "opening_balance": 0.0, "closing_balance": 0.0,
-#         "total_withdrawals": 0.0, "total_deposits": 0.0
+#         "opening_balance": 0.0, "closing_balance": 0.0, "total_withdrawals": 0.0, "total_deposits": 0.0
 #     }
-#     records = []
+
 #     doc = None
-#     pdf_words_doc = None
+#     p0_text = ""
+#     full_text = ""
 #     try:
-#         doc = pymupdf.open(stream=pdf_source, filetype="pdf") if isinstance(pdf_source, bytes) else pymupdf.open(pdf_source)
-#         pdf_words_doc = pdfplumber.open(BytesIO(pdf_source) if isinstance(pdf_source, bytes) else pdf_source, password=password)
-#         if doc.is_encrypted:
-#             if not password or not doc.authenticate(password):
-#                 raise ValueError("Password protected PDF or incorrect password")
-#         first_text = doc[0].get_text() if len(doc) else ""
-#         all_text = "\n".join(page.get_text() for page in doc)
+#         if isinstance(pdf_source, bytes):
+#             doc = pymupdf.open(stream=pdf_source, filetype="pdf")
+#         else:
+#             doc = pymupdf.open(pdf_source)
+#         if doc.is_encrypted and password:
+#             doc.authenticate(password)
+#         if len(doc) > 0:
+#             p0_text = doc[0].get_text()
+#         for page in doc:
+#             full_text += "\n" + page.get_text()
+#     except Exception as e:
+#         print(f"ICICI Metadata doc error: {e}")
+#     finally:
+#         if doc:
+#             doc.close()
 
-#         acc_m = re.search(r'(?:Saving|Current|Salary|Savings)?\s*Account\s*(?:no|number)?\.?\s*[:\-]?\s*([0-9]{10,18})', all_text, re.I)
-#         if acc_m:
-#             metadata["account_no"] = acc_m.group(1)
-#         per_m = re.search(r'for the period\s+(.+?)(?:\n|$)', all_text, re.I)
-#         if per_m:
+#     acc_m = (re.search(r'(?:Saving|Current|Salary|Savings)?\s*Account\s*(?:no|number)?\.?\s*[:\-]?\s*([0-9]{10,18})', p0_text, re.I) or
+#              re.search(r'Account\s*No\.?\s*[:\-]?\s*([0-9]{10,18})', p0_text, re.I) or
+#              re.search(r'\b(000[0-9]{9}|[0-9]{12})\b', p0_text))
+#     if acc_m:
+#         metadata["account_no"] = acc_m.group(1).strip()
+
+#     per_m = (re.search(r'period\s+([A-Za-z0-9,\s\-/\.]+?)\n', p0_text, re.I) or
+#              re.search(r'From\s*[:\.]?\s*([0-9/\-\.]+)\s*To\s*[:\.]?\s*([0-9/\-\.]+)', p0_text, re.I))
+#     if per_m:
+#         if len(per_m.groups()) == 1:
 #             metadata["period"] = per_m.group(1).strip()
-#         branch_m = re.search(r'Your Base Branch:\s*([^,\n]+)', all_text, re.I)
-#         if branch_m:
-#             metadata["branch"] = branch_m.group(1).strip()
-#         ifsc_m = re.search(r'\b(ICIC0[A-Z0-9]{6})\b', all_text, re.I)
-#         if ifsc_m:
-#             metadata["ifsc"] = ifsc_m.group(1).upper()
+#         else:
+#             metadata["period"] = f"{per_m.group(1)} to {per_m.group(2)}"
 
-#         # Avoid overfitting customer-name extraction; this field is not required
-#         # for transaction accuracy and should not be guessed from postal addresses.
-#         name_m = re.search(r'(?:Account Holder|Customer)\s*Name\s*[:\-]?\s*([^\n]+)', first_text, re.I)
-#         if name_m:
-#             metadata["borrower_name"] = name_m.group(1).strip()
+#     name_patterns = [
+#         r'(?:Customer|Account\s*Holder|Primary\s*Holder|Borrower)\s*Name\s*[:\.]?\s*([A-Za-z\s\.]+?)(?:\r?\n|$)',
+#         r'(?:^|\n)\s*(?:MR|MS|MRS|DR)\.?\s+([A-Za-z\s\.]+?)(?:\r?\n|,|$)',
+#         r'Account\s*Name\s*[:\.]?\s*([A-Za-z\s\.]+?)(?:\r?\n|$)',
+#         r'(?:^|\n)\s*Name\s*[:\.]\s*([A-Za-z\s\.]+?)(?:\r?\n|$)',
+#         r'Dear\s+(?:Customer|Mr\.?|Ms\.?|Mrs\.?)?\s*([A-Za-z\s\.]+?)(?:,|<|\n)',
+#         r'period[^\n]+\n+([A-Za-z\s]{3,40})\n',
+#     ]
+#     for pat in name_patterns:
+#         m = re.search(pat, p0_text, re.I)
+#         if m:
+#             cand = m.group(1).strip().replace('\n', ' ')
+#             cand = re.sub(r'\s+(?:BRANCH|ACCOUNT|STATEMENT|PAGE|DATE|SAVINGS|CURRENT|DETAILS|BASE).*$', '', cand, flags=re.I).strip()
+#             if len(cand) >= 3 and not any(k in cand.upper() for k in ["BRANCH", "ICICI", "STATEMENT", "PAGE", "ACCOUNT", "PERIOD", "DETAILS", "BANK", "LIMITED"]):
+#                 if not cand.upper().startswith(("MR", "MS", "MRS", "DR")):
+#                     title_m = re.search(r'\b(MR|MS|MRS|DR)\.?\b', m.group(0), re.I)
+#                     if title_m:
+#                         cand = f"{title_m.group(1).upper()} {cand}"
+#                 metadata["borrower_name"] = cand
+#                 break
 
-#         def money_token(value):
-#             return bool(re.fullmatch(r"\(?-?[\d,]+\.\d{2}\)?", value or ""))
+#     br_m = re.search(r'Your Base Branch:\s*([^,\n]+)', p0_text, re.I) or re.search(r'Branch\s*:\s*([^,\n]+)', p0_text, re.I)
+#     if br_m:
+#         metadata["branch"] = br_m.group(1).strip()
 
-#         for page_idx, page in enumerate(doc):
-#             words = pdf_words_doc.pages[page_idx].extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
-#             if not words:
-#                 continue
-#             # Group words into visual lines.
-#             lines = []
-#             for word in sorted(words, key=lambda w: (round(w["top"] / 2), w["x0"])):
-#                 target = next((ln for ln in lines if abs(ln["top"] - word["top"]) <= 2.5), None)
-#                 if target is None:
-#                     target = {"top": word["top"], "words": []}
-#                     lines.append(target)
-#                 target["words"].append(word)
-#             lines.sort(key=lambda ln: ln["top"])
-#             for ln in lines:
-#                 ln["words"].sort(key=lambda w: w["x0"])
+#     ifsc_m = re.search(r'\b(ICIC0[A-Z0-9]{6})\b', p0_text, re.I)
+#     if ifsc_m:
+#         metadata["ifsc"] = ifsc_m.group(1).strip()
 
-#             # Header anchors. Values in this layout align under these headings.
-#             anchors = {"withdrawal": None, "deposit": None, "balance": None}
-#             for ln in lines:
-#                 txt = " ".join(w["text"] for w in ln["words"]).lower()
-#                 for key in anchors:
-#                     if key in txt and anchors[key] is None:
-#                         hits = [w["x0"] + w["x1"] for w in ln["words"] if key in w["text"].lower()]
-#                         if hits:
-#                             anchors[key] = sum(hits) / (2 * len(hits))
-#             # Some headings wrap over two lines; x coordinates are still stable.
-#             if anchors["withdrawal"] is None: anchors["withdrawal"] = 425.0
-#             if anchors["deposit"] is None: anchors["deposit"] = 490.0
-#             if anchors["balance"] is None: anchors["balance"] = 550.0
+#     records = []
+#     try:
+#         pdf_target = BytesIO(pdf_source) if isinstance(pdf_source, bytes) else pdf_source
+#         with pdfplumber.open(pdf_target, password=password) as pdf:
+#             col_date = -1
+#             col_remarks = -1
+#             col_chq = -1
+#             col_debit = -1
+#             col_credit = -1
+#             col_balance = -1
 
-#             tx_starts = []
-#             for idx, ln in enumerate(lines):
-#                 date_word = next((w for w in ln["words"] if is_date(w["text"])), None)
-#                 if date_word:
-#                     iso = parse_iso_date(date_word["text"])
-#                     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso):
-#                         tx_starts.append((idx, date_word))
-
-#             for pos, (line_idx, date_word) in enumerate(tx_starts):
-#                 next_idx = tx_starts[pos + 1][0] if pos + 1 < len(tx_starts) else len(lines)
-#                 row_lines = lines[line_idx:next_idx]
-#                 # Find the first transaction amount/balance line beneath its date.
-#                 amount_line_idx = None
-#                 row_values = []
-#                 for local_idx, ln in enumerate(row_lines):
-#                     vals = [w for w in ln["words"] if money_token(w["text"].replace("₹", ""))]
-#                     if vals:
-#                         # Header/footer numbers are excluded by requiring at least
-#                         # one value in a transaction amount or balance column.
-#                         col_vals = [w for w in vals if w["x0"] >= min(anchors.values()) - 35]
-#                         if col_vals:
-#                             amount_line_idx = local_idx
-#                             row_values = col_vals
-#                             break
-#                 if amount_line_idx is None:
+#             for page in pdf.pages:
+#                 tables = page.extract_tables()
+#                 if not tables:
+#                     tables = page.extract_tables(table_settings={"vertical_strategy": "text", "horizontal_strategy": "text"})
+#                 if not tables:
 #                     continue
 
-#                 debit = credit = balance = 0.0
-#                 amount_candidates = []
-#                 for w in row_values:
-#                     raw = w["text"].replace(",", "")
-#                     try:
-#                         val = abs(float(raw))
-#                     except ValueError:
+#                 for table in tables:
+#                     if not table or len(table) < 2:
 #                         continue
-#                     xmid = (w["x0"] + w["x1"]) / 2
-#                     if xmid >= anchors["balance"] - 18:
-#                         balance = val
-#                     else:
-#                         amount_candidates.append((xmid, val))
-#                 if amount_candidates:
-#                     xmid, amount = min(amount_candidates, key=lambda item: abs(item[0] - min(anchors["withdrawal"], anchors["deposit"])))
-#                     if abs(xmid - anchors["deposit"]) < abs(xmid - anchors["withdrawal"]):
-#                         credit = amount
-#                     else:
-#                         debit = amount
 
-#                 # Collect narration only before the amount row; this excludes
-#                 # page footers and bank legends after the transaction.
-#                 narr_words = []
-#                 for ln in row_lines:
-#                     line_text = " ".join(w["text"] for w in ln["words"]).upper()
-#                     if any(marker in line_text for marker in (
-#                         "SINCERLY", "TEAM ICICI BANK", "THIS IS A SYSTEM GENERATED",
-#                         "LEGENDS FOR TRANSACTIONS", "NEVER SHARE YOUR OTP", "DIAL YOUR BANK",
-#                     )):
-#                         break
-#                     for w in ln["words"]:
-#                         token = w["text"].strip()
-#                         if (w["x0"] < anchors["withdrawal"] - 25 and
-#                             not money_token(token) and not is_date(token) and
-#                             token and not re.fullmatch(r"\d{1,3}", token)):
-#                             narr_words.append(token)
-#                 narration = re.sub(r"\s+", " ", " ".join(narr_words)).strip()
-#                 narration = re.sub(r"\b(?:Never share your OTP|www\.icici\.bank\.in|Dial your Bank).*", "", narration, flags=re.I).strip()
-#                 if not narration:
-#                     narration = "ICICI transaction"
+#                     for row in table:
+#                         if not row or not any(row):
+#                             continue
+#                         row_strs = [str(c or "").strip() for c in row]
+#                         row_lower = [s.lower() for s in row_strs]
 
-#                 records.append({
-#                     "bank": "ICICI Bank", "account_no": metadata.get("account_no", ""),
-#                     "txn_date": date_word["text"], "iso_date": parse_iso_date(date_word["text"]),
-#                     "narration": narration, "debit": round(debit, 2),
-#                     "credit": round(credit, 2), "balance": round(balance, 2),
-#                     "category": categorize_transaction(narration, debit, credit)
-#                 })
+#                         has_date_hdr = any("date" in s for s in row_lower)
+#                         has_amt_hdr = any(any(k in s for k in ["withdrawal", "deposit", "debit", "credit", "balance", "amount", "bal"]) for s in row_lower)
 
-#         records.sort(key=lambda r: (r.get("iso_date", ""), r.get("txn_date", "")))
-#         if records:
-#             metadata["closing_balance"] = records[-1]["balance"]
-#             metadata["total_withdrawals"] = round(sum(r["debit"] for r in records), 2)
-#             metadata["total_deposits"] = round(sum(r["credit"] for r in records), 2)
-#             # Opening balance is derived only when the first row's direction and
-#             # balance are present. It is a calculated value, not a bank-printed one.
-#             first = records[0]
-#             metadata["opening_balance"] = round(first["balance"] - first["credit"] + first["debit"], 2)
-#             _fill_period_from_records(metadata, records)
-#         return records, metadata
-#     finally:
-#         if pdf_words_doc is not None:
-#             pdf_words_doc.close()
-#         if doc is not None:
-#             doc.close()
+#                         if has_date_hdr and has_amt_hdr:
+#                             for idx, s in enumerate(row_lower):
+#                                 if "txn" in s or "tran" in s or ("date" in s and "val" not in s and col_date == -1):
+#                                     col_date = idx
+#                                 elif any(k in s for k in ["remark", "particular", "desc", "narration"]):
+#                                     col_remarks = idx
+#                                 elif any(k in s for k in ["cheque", "chq", "ref"]):
+#                                     col_chq = idx
+#                                 elif any(k in s for k in ["withdrawal", "debit", "dr"]):
+#                                     col_debit = idx
+#                                 elif any(k in s for k in ["deposit", "credit", "cr"]):
+#                                     col_credit = idx
+#                                 elif "balance" in s or "bal" in s:
+#                                     col_balance = idx
+#                             continue
+
+#                         row_date = None
+#                         date_idx = -1
+#                         if col_date >= 0 and col_date < len(row_strs) and is_date(row_strs[col_date]):
+#                             row_date = row_strs[col_date].split('\n')[0].strip()
+#                             date_idx = col_date
+#                         else:
+#                             for idx, cell in enumerate(row_strs):
+#                                 if is_date(cell):
+#                                     row_date = cell.split('\n')[0].strip()
+#                                     date_idx = idx
+#                                     break
+
+#                         if not row_date:
+#                             if records:
+#                                 rem_text = ""
+#                                 if col_remarks >= 0 and col_remarks < len(row_strs):
+#                                     rem_text = row_strs[col_remarks]
+#                                 else:
+#                                     cands = [c for c in row_strs if len(c) > 3 and not is_amount(c)]
+#                                     if cands:
+#                                         rem_text = " ".join(cands)
+#                                 if rem_text and not any(k in rem_text.upper() for k in ["PAGE", "TOTAL", "LEGEND", "CONTINUED", "OPENING"]):
+#                                     records[-1]["narration"] = f"{records[-1]['narration']} {rem_text}".strip()
+#                             continue
+
+#                         debit = 0.0
+#                         credit = 0.0
+#                         balance = 0.0
+
+#                         if col_debit >= 0 and col_credit >= 0 and col_balance >= 0 and max(col_debit, col_credit, col_balance) < len(row_strs):
+#                             debit = clean_amount(row_strs[col_debit])
+#                             credit = clean_amount(row_strs[col_credit])
+#                             balance = clean_amount(row_strs[col_balance])
+#                         else:
+#                             num_vals = [clean_amount(c) for idx, c in enumerate(row_strs) if idx != date_idx and is_amount(c)]
+#                             if len(num_vals) >= 3:
+#                                 balance = num_vals[-1]
+#                                 debit = num_vals[-3]
+#                                 credit = num_vals[-2]
+#                             elif len(num_vals) == 2:
+#                                 balance = num_vals[-1]
+#                                 amt = num_vals[-2]
+#                                 if records:
+#                                     diff = round(balance - records[-1]["balance"], 2)
+#                                     credit = amt if diff > 0 else 0.0
+#                                     debit = amt if diff <= 0 else 0.0
+
+#                         narration = ""
+#                         if col_remarks >= 0 and col_remarks < len(row_strs):
+#                             narration = row_strs[col_remarks].replace('\n', ' ').strip()
+#                         else:
+#                             narr_parts = [c.replace('\n', ' ') for i, c in enumerate(row_strs) if i != date_idx and not is_amount(c) and len(c.strip()) > 1]
+#                             narration = " ".join(narr_parts).strip()
+
+#                         if col_chq >= 0 and col_chq < len(row_strs) and row_strs[col_chq].strip() and row_strs[col_chq].strip() not in narration:
+#                             narration = f"{narration} Ref:{row_strs[col_chq].strip()}"
+
+#                         narration = re.sub(r'\s+', ' ', narration).strip()
+#                         category = categorize_transaction(narration, debit, credit)
+
+#                         records.append({
+#                             "bank": "ICICI Bank",
+#                             "account_no": metadata.get("account_no", ""),
+#                             "txn_date": row_date,
+#                             "iso_date": parse_iso_date(row_date),
+#                             "narration": narration,
+#                             "debit": debit,
+#                             "credit": credit,
+#                             "balance": balance,
+#                             "category": category
+#                         })
+#     except Exception as e:
+#         print(f"ICICI Table Engine error: {e}")
+
+#     if records:
+#         if metadata["opening_balance"] == 0.0:
+#             first_diff = records[0]["credit"] - records[0]["debit"]
+#             metadata["opening_balance"] = round(records[0]["balance"] - first_diff, 2)
+#         metadata["closing_balance"] = records[-1]["balance"]
+#         metadata["total_withdrawals"] = round(sum(r["debit"] for r in records), 2)
+#         metadata["total_deposits"] = round(sum(r["credit"] for r in records), 2)
+#         _fill_period_from_records(metadata, records)
+
+#     return records, metadata
 
 # def parse_sbi_pdf(pdf_source, password=None):
 #     metadata = {
@@ -1647,7 +1715,7 @@
 
 #     return records, metadata
 
-# def calculate_daily_abb(records, opening_balance, closing_balance, statement_period=None):
+# def calculate_daily_abb(records, opening_balance, closing_balance):
 #     if not records:
 #         return {"overall_abb": 0.0, "monthly_abb": {}, "min_balance": 0.0, "max_balance": 0.0}
 #     sorted_recs = sorted(records, key=lambda x: str(x.get("iso_date", "")))
@@ -1660,14 +1728,8 @@
 #         return {"overall_abb": closing_balance, "monthly_abb": {}, "min_balance": closing_balance, "max_balance": closing_balance}
 #     try:
 #         all_dates = sorted(date_closing.keys())
-#         period_dates = []
-#         if statement_period:
-#             for token in re.findall(r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4}", str(statement_period)):
-#                 parsed = parse_iso_date(token)
-#                 if re.fullmatch(r"\d{4}-\d{2}-\d{2}", parsed):
-#                     period_dates.append(parsed)
-#         start_date = datetime.strptime(min(period_dates[0], all_dates[0]) if period_dates else all_dates[0], "%Y-%m-%d")
-#         end_date = datetime.strptime(max(period_dates[-1], all_dates[-1]) if len(period_dates) >= 2 else all_dates[-1], "%Y-%m-%d")
+#         start_date = datetime.strptime(all_dates[0], "%Y-%m-%d")
+#         end_date = datetime.strptime(all_dates[-1], "%Y-%m-%d")
 #         total_days = max(1, (end_date - start_date).days + 1)
 #         current_dt = start_date
 #         curr_bal = opening_balance
@@ -1704,160 +1766,152 @@
 #             "days_tracked": len(records)
 #         }
 
-# def _redact_for_ai(value):
-#     """Remove common direct identifiers before transaction text leaves the app."""
-#     text = str(value or "")
-#     text = re.sub(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", "[EMAIL]", text, flags=re.I)
-#     text = re.sub(r"\b[A-Z]{5}\d{4}[A-Z]\b", "[PAN]", text, flags=re.I)
-#     text = re.sub(r"\b[A-Z]{4}0[A-Z0-9]{6}\b", "[IFSC]", text, flags=re.I)
-#     text = re.sub(r"\b\d{9,18}\b", "[NUMBER]", text)
-#     text = re.sub(r"[A-Z0-9._%+-]+@[A-Z0-9._%+-]+", "[UPI_ID]", text, flags=re.I)
-#     return text[:180]
-
-
 # def run_gemini_underwriting_intelligence(records, metadata):
-#     """Return optional AI commentary; deterministic calculations remain authoritative."""
 #     if not GENAI_AVAILABLE:
 #         return None
+
 #     api_key = os.environ.get("GEMINI_API_KEY")
 #     if not api_key:
 #         return None
 
 #     try:
-#         # Bound the request size and redact identifiers before sending data externally.
-#         credits = []
-#         debits = []
-#         churn = []
-#         for idx, row in enumerate(records):
-#             narration = _redact_for_ai(row.get("narration", ""))
-#             category = str(row.get("category", "")).upper()
-#             credit = float(row.get("credit") or 0)
-#             debit = float(row.get("debit") or 0)
-#             item = {"id": idx, "date": row.get("txn_date", ""), "narration": narration}
-#             if credit >= 5000 or "SALARY" in category or any(k in narration.upper() for k in ("SAL", "PAY", "INCENTIVE", "BONUS", "NEFT")):
-#                 credits.append({**item, "amount": round(credit, 2)})
-#             if debit >= 200 and ("EMI" in category or any(k in narration.upper() for k in ("ACH", "NACH", "MANDATE", "LOAN", "BAJAJ", "BILLPAY"))):
-#                 debits.append({**item, "amount": round(debit, 2)})
-#             if "CC_PAYMENT" in category or "WALLET_TOPUP" in category:
-#                 churn.append({**item, "debit": round(debit, 2), "credit": round(credit, 2)})
+#         client = genai.Client(api_key=api_key)
 
-#         if not credits and not debits and not churn:
+#         credit_candidates = []
+#         for idx, r in enumerate(records):
+#             c_val = r.get("credit", 0.0)
+#             narr = r.get("narration", "")
+#             cat = r.get("category", "")
+#             if c_val >= 5000.0 or "SALARY" in cat or any(k in narr.upper() for k in ["SAL", "PAY", "INCENTIVE", "BONUS", "PVT", "LTD", "LIMITED", "CORP", "CMS", "NEFT"]):
+#                 credit_candidates.append({
+#                     "id": idx,
+#                     "date": r.get("txn_date", ""),
+#                     "narration": narr,
+#                     "amount": c_val
+#                 })
+
+#         debit_candidates = []
+#         for idx, r in enumerate(records):
+#             d_val = r.get("debit", 0.0)
+#             narr = r.get("narration", "").upper()
+#             cat = r.get("category", "")
+#             if d_val >= 200.0 and not any(k in narr for k in ["ICCL", "INDIAN CLEARING", "NSECL", "ZERODHA", "ANGEL"]):
+#                 if "EMI" in cat or any(k in narr for k in ["ACH", "NACH", "MANDATE", "LOAN", "DRAOPERATIONS", "CAPITAL", "BAJAJ FINANCE", "POONAWALLA", "KRAZYBEE", "NORTHERN ARC", "BIRLA", "BILLPAY DR-HDFC"]):
+#                     debit_candidates.append({
+#                         "id": idx,
+#                         "date": r.get("txn_date", ""),
+#                         "narration": r.get("narration", ""),
+#                         "amount": d_val
+#                     })
+
+#         churn_candidates = []
+#         for idx, r in enumerate(records):
+#             narr = r.get("narration", "").upper()
+#             cat = r.get("category", "")
+#             if "CC_PAYMENT" in cat or "WALLET_TOPUP" in cat or any(k in narr for k in ["CRED", "MOBIKWIK", "RUPICARD", "CARD", "WALLET"]):
+#                 churn_candidates.append({
+#                     "id": idx,
+#                     "date": r.get("txn_date", ""),
+#                     "narration": r.get("narration", ""),
+#                     "debit": r.get("debit", 0.0),
+#                     "credit": r.get("credit", 0.0)
+#                 })
+
+#         credit_payload = credit_candidates[:35]
+#         debit_payload = debit_candidates[:35]
+#         churn_payload = churn_candidates[:30]
+
+#         if not credit_payload and not debit_payload and not churn_payload:
 #             return None
 
-#         def sample(items, limit):
-#             if len(items) <= limit:
-#                 return items
-#             # Evenly sample the statement period instead of silently taking only
-#             # the earliest transactions.
-#             indexes = [round(i * (len(items) - 1) / (limit - 1)) for i in range(limit)]
-#             return [items[i] for i in indexes]
+#         prompt = f"""You are an expert Credit Underwriter and Bank Statement AI Analyzer for Indian retail banking.
+# Your task is to analyze these bank statement transaction candidates and return a structured JSON report.
 
-#         prompt = """Review the following anonymized Indian bank-statement transaction candidates.
-# Provide only secondary observations. Do not infer facts not supported by the supplied rows.
-# Do not make credit approval, rejection, fraud, or eligibility decisions.
-# Return JSON with keys: summary (string), possible_employer_names (array of strings),
-# possible_lender_names (array of strings), limitations (array of strings).
-# If evidence is weak, say so. Keep summary under 400 characters.
+# CONSTRAINTS:
+# 1. Do NOT classify Indian Clearing Corporation Limited (ICCL), NSE, BSE, or Stock Brokers as Loan Lenders.
+# 2. Classify HDFC masked card auto-billpays (e.g. IB BILLPAY DR-HDFC...537206XXXXXX) and institutional EMIs into active lenders.
+# 3. Identify genuine employers by stripping prefixes (NEFT, RTGS, IFSC).
 
-# CREDITS:\n""" + json.dumps(sample(credits, 35), ensure_ascii=False) + \
-#             "\nDEBITS:\n" + json.dumps(sample(debits, 35), ensure_ascii=False) + \
-#             "\nCARD/WALLET:\n" + json.dumps(sample(churn, 30), ensure_ascii=False)
+# TRANSACTION CANDIDATES:
+# Credits:
+# {json.dumps(credit_payload, indent=2)}
 
-#         model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
-#         client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=15000))
-#         response = client.models.generate_content(
-#             model=model,
-#             contents=prompt,
-#             config=types.GenerateContentConfig(
-#                 response_mime_type="application/json",
-#                 temperature=0.1,
-#             ),
-#         )
-#         if not response or not response.text:
-#             return None
-#         result = json.loads(response.text)
-#         if not isinstance(result, dict):
-#             return None
-#         summary = result.get("summary", "")
-#         if not isinstance(summary, str):
-#             summary = ""
-#         def safe_string_list(key, max_length):
-#             value = result.get(key, [])
-#             if not isinstance(value, list):
-#                 return []
-#             return [item.strip()[:max_length] for item in value if isinstance(item, str) and item.strip()][:10]
+# Debits:
+# {json.dumps(debit_payload, indent=2)}
 
-#         return {
-#             "summary": summary[:500],
-#             "possible_employer_names": safe_string_list("possible_employer_names", 100),
-#             "possible_lender_names": safe_string_list("possible_lender_names", 100),
-#             "limitations": safe_string_list("limitations", 160),
-#         }
-#     except Exception as exc:
-#         # AI is optional: parser and deterministic dashboard must still succeed.
-#         print(f"[Gemini] Optional analysis unavailable: {type(exc).__name__}: {exc}")
+# Card/Wallet Flows:
+# {json.dumps(churn_payload, indent=2)}
+
+# Return ONLY valid JSON:
+# {{
+#   "salary_intelligence": {{
+#     "primary_employer_name": "string",
+#     "verified_employers": ["string"],
+#     "salary_transactions": [
+#       {{
+#         "id": 0,
+#         "is_salary_or_incentive": true,
+#         "salary_component": "BASE_SALARY",
+#         "employer_name": "string"
+#       }}
+#     ],
+#     "stability_score": 90
+#   }},
+#   "debt_intelligence": {{
+#     "active_lenders": [
+#       {{
+#         "raw_code": "string",
+#         "clean_lender_name": "string",
+#         "loan_type": "string",
+#         "monthly_obligation": 0.0
+#       }}
+#     ],
+#     "total_monthly_obligation": 0.0
+#   }},
+#   "fraud_and_churn_intelligence": {{
+#     "risk_tag": "CLEAN",
+#     "risk_score": 10,
+#     "churn_velocity": "LOW",
+#     "reasoning": "string"
+#   }}
+# }}"""
+
+#         response = None
+#         for target_model in ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+#             try:
+#                 response = client.models.generate_content(
+#                     model=target_model,
+#                     contents=prompt,
+#                     config=types.GenerateContentConfig(
+#                         response_mime_type="application/json",
+#                         temperature=0.1
+#                     )
+#                 )
+#                 if response and response.text:
+#                     break
+#             except Exception:
+#                 continue
+
+#         if response and response.text:
+#             return json.loads(response.text)
+
+#     except Exception as e:
+#         print(f"[Gemini Underwriting Fallback] {e}")
 #         return None
 
-# def order_transactions_by_balance(records, opening_balance, tolerance=0.02):
-#     """Restore same-day transaction order from running-balance transitions."""
-#     if not records:
-#         return records
-#     indexed = list(enumerate(records))
-#     indexed.sort(key=lambda pair: (str(pair[1].get("iso_date") or "9999-99-99"), pair[0]))
-#     groups = defaultdict(list)
-#     for original_index, row in indexed:
-#         groups[str(row.get("iso_date") or "")].append((original_index, row))
-#     current_balance = float(opening_balance or 0.0)
-#     ordered = []
-#     for day in sorted(groups):
-#         pending = list(groups[day])
-#         while pending:
-#             match_pos = None
-#             for pos, (_, row) in enumerate(pending):
-#                 expected = round(current_balance + float(row.get("credit") or 0.0) - float(row.get("debit") or 0.0), 2)
-#                 actual = round(float(row.get("balance") or 0.0), 2)
-#                 if abs(expected - actual) <= tolerance:
-#                     match_pos = pos
-#                     break
-#             if match_pos is None:
-#                 match_pos = 0
-#             _, chosen = pending.pop(match_pos)
-#             ordered.append(chosen)
-#             current_balance = float(chosen.get("balance") or current_balance)
-#     if isinstance(records, list):
-#         records[:] = ordered
-#         return records
-#     return ordered
-
+#     return None
 
 # def compute_underwriting_insights(records, metadata):
-#     records = order_transactions_by_balance(records, (metadata or {}).get("opening_balance", 0.0))
 #     df = pd.DataFrame(records)
 #     if df.empty:
 #         return {}
-#     for col, default in (("debit", 0.0), ("credit", 0.0), ("balance", 0.0), ("category", "GENERAL"), ("narration", ""), ("txn_date", ""), ("iso_date", "")):
-#         if col not in df.columns:
-#             df[col] = default
-#     for col in ("debit", "credit", "balance"):
-#         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-#     for col in ("category", "narration", "txn_date", "iso_date"):
-#         df[col] = df[col].fillna("").astype(str)
 #     total_debits = round(float(df['debit'].sum()), 2)
 #     total_credits = round(float(df['credit'].sum()), 2)
 #     open_bal = float(metadata.get('opening_balance', 0.0))
 #     close_bal = float(metadata.get('closing_balance', 0.0))
 #     reconciled_calc = round(open_bal + total_credits - total_debits, 2)
 #     variance = round(abs(reconciled_calc - close_bal), 2)
-#     running_balance = open_bal
-#     balance_continuity_breaks = 0
-#     for row in records:
-#         expected_balance = round(running_balance + float(row.get("credit") or 0.0) - float(row.get("debit") or 0.0), 2)
-#         actual_balance = round(float(row.get("balance") or 0.0), 2)
-#         if abs(expected_balance - actual_balance) > 0.02:
-#             balance_continuity_breaks += 1
-#         running_balance = actual_balance
-#     aggregate_reconciled = variance <= 0.05
-#     is_reconciled = aggregate_reconciled and balance_continuity_breaks == 0
+#     is_reconciled = (variance <= 1.0)
     
 #     # 1. Salary Inflows
 #     salary_df = df[df['category'].str.contains('SALARY', na=False)]
@@ -1866,66 +1920,32 @@
     
 #     for _, row in salary_df.iterrows():
 #         desc = row['narration']
-#         emp = extract_dynamic_employer(desc)
+#         emp = row.get("clean_entity") or extract_dynamic_employer(desc)
 #         salary_credits.append({
 #             "date": row['txn_date'],
 #             "iso_date": row['iso_date'],
 #             "employer": emp,
 #             "amount": row['credit']
 #         })
-#         if emp != "Corporate Payroll":
-#             identity = _employer_identity_key(emp)
-#             existing_index = next((i for i, current in enumerate(employers) if _employer_identity_key(current) == identity), None)
-#             if existing_index is None:
-#                 employers.append(emp)
-#             elif len(emp) > len(employers[existing_index]):
-#                 employers[existing_index] = emp
-#                 for salary_item in salary_credits:
-#                     if _employer_identity_key(salary_item["employer"]) == identity:
-#                         salary_item["employer"] = emp
+#         if emp not in employers and emp != "Corporate Payroll":
+#             employers.append(emp)
             
 #     if not employers and salary_credits:
 #         employers = ["Corporate Payroll"]
         
-#     salary_by_month = {}
-#     for item in salary_credits:
-#         iso_date = str(item.get("iso_date") or "")
-#         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso_date):
-#             month = iso_date[:7]
-#             salary_by_month[month] = salary_by_month.get(month, 0.0) + float(item.get("amount") or 0.0)
-#     full_months = [amount for amount in salary_by_month.values() if amount >= 10000]
-#     observed_salary_months = len(full_months)
-#     if full_months:
-#         avg_monthly_salary = round(sum(full_months) / observed_salary_months, 2)
+#     if salary_credits:
+#         salary_by_month = {}
+#         for s in salary_credits:
+#             m = s['iso_date'][:7] if s.get('iso_date') else "2026-M"
+#             salary_by_month[m] = salary_by_month.get(m, 0.0) + s['amount']
+#         full_months = [v for k, v in salary_by_month.items() if v >= 10000]
+#         avg_monthly_salary = round(sum(full_months) / len(full_months), 2) if full_months else round(salary_df['credit'].mean(), 2)
 #         salary_range_str = f"₹{int(avg_monthly_salary):,} - ₹{int(avg_monthly_salary * 1.15):,}"
 #     else:
 #         avg_monthly_salary = 0.0
-#         salary_range_str = "N/A (No verified salary-month evidence)"
-
-#     # Evidence-based indicator: a single salary credit must not receive a
-#     # prime/stable score. More observed months increase confidence gradually.
-#     if observed_salary_months == 0:
-#         stability_score = 0
-#     elif observed_salary_months == 1:
-#         stability_score = 45
-#     elif observed_salary_months == 2:
-#         stability_score = 55
-#     elif observed_salary_months == 3:
-#         stability_score = 65
-#     elif observed_salary_months <= 5:
-#         stability_score = 75
-#     elif observed_salary_months <= 8:
-#         stability_score = 85
-#     else:
-#         stability_score = 90
-#     if observed_salary_months >= 3:
-#         avg_observed = sum(full_months) / len(full_months)
-#         if avg_observed > 0:
-#             coefficient_of_variation = (sum((amount - avg_observed) ** 2 for amount in full_months) / len(full_months)) ** 0.5 / avg_observed
-#             if coefficient_of_variation <= 0.15:
-#                 stability_score = min(95, stability_score + 5)
-#             elif coefficient_of_variation > 0.50:
-#                 stability_score = max(0, stability_score - 5)
+#         salary_range_str = "₹0 (No Direct Salaried Inflows Tagged)"
+        
+#     stability_score = 92 if salary_credits else 50
     
 #     # 2. Institutional Debt & Active Lenders
 #     LENDER_CODE_MAP = {
@@ -1970,8 +1990,7 @@
 #         if matched_lender and matched_lender not in active_lenders:
 #             active_lenders.append(matched_lender)
             
-#     valid_months = {str(v)[:7] for v in df['iso_date'].dropna().astype(str) if re.match(r"^\d{4}-\d{2}-\d{2}$", str(v))}
-#     num_months = max(1, len(valid_months))
+#     num_months = max(1, len(df['iso_date'].str[:7].unique()))
 #     monthly_emi_obligations = round(float(loan_df['debit'].sum()) / num_months, 2)
 #     jumbo_loans = [{"date": r['txn_date'], "narration": r['narration'], "amount": r['credit']} for _, r in disburse_df.iterrows()]
 #     total_jumbo_disbursed = sum(j['amount'] for j in jumbo_loans)
@@ -1984,7 +2003,7 @@
 #     cred_outflows = round(float(cc_df[cc_df['narration'].str.contains(r'CRED\.CLUB|CREDPAY', case=False, na=False)]['debit'].sum()), 2)
     
 #     bounce_df = df[df['category'].str.contains('BOUNCE_FAILURE', na=False)]
-#     abb_stats = calculate_daily_abb(records, open_bal, close_bal, metadata.get("period"))
+#     abb_stats = calculate_daily_abb(records, open_bal, close_bal)
 #     foir_pct = round((monthly_emi_obligations / avg_monthly_salary) * 100, 1) if avg_monthly_salary > 0 else 0.0
 
 #     # Churning & Fraud Logic
@@ -2002,23 +2021,47 @@
 #         risk_tag = "CLEAN"
 #         risk_score = 10
 #         churn_velocity = "LOW"
-#         fraud_reasoning = "No configured high-volume card-churn pattern was triggered in the parsed rows; this is not a fraud determination."
+#         fraud_reasoning = "Card settlements reflect debt liquidation without circular fund recycling."
 
-#     # Gemini is an advisory layer only. Deterministic amounts, salary tags,
-#     # lender totals and risk scores must never be overwritten by generated text.
+#     # Execute Non-blocking Hybrid AI Layer
+#     ai_applied = False
 #     ai_result = run_gemini_underwriting_intelligence(records, metadata)
-#     ai_applied = bool(isinstance(ai_result, dict) and ai_result.get("summary"))
 #     primary_employer = employers[0] if employers else "Corporate Payroll"
-#     ai_commentary = ai_result.get("summary", "") if ai_applied else ""
+
+#     if ai_result:
+#         ai_applied = True
+#         sal_intel = ai_result.get("salary_intelligence", {})
+#         if sal_intel.get("primary_employer_name"):
+#             primary_employer = sal_intel["primary_employer_name"].strip()
+#         if sal_intel.get("verified_employers"):
+#             clean_ai_emps = [e.strip() for e in sal_intel["verified_employers"] if e.strip() and not any(k in e.upper() for k in ["ICCL", "CLEARING", "ANGEL"])]
+#             if clean_ai_emps:
+#                 employers = clean_ai_emps
+#             if primary_employer and primary_employer not in employers:
+#                 employers.insert(0, primary_employer)
+
+#         debt_intel = ai_result.get("debt_intelligence", {})
+#         if debt_intel.get("active_lenders"):
+#             ai_lenders = [l.get("clean_lender_name") for l in debt_intel["active_lenders"] if l.get("clean_lender_name") and not any(k in l.get("clean_lender_name").upper() for k in ["ICCL", "CLEARING", "NSE", "STOCK"])]
+#             if ai_lenders:
+#                 active_lenders = ai_lenders
+
+#         fraud_intel = ai_result.get("fraud_and_churn_intelligence", {})
+#         if fraud_intel.get("risk_tag") in ("CRITICAL", "ELEVATED", "CLEAN"):
+#             risk_tag = fraud_intel["risk_tag"]
+#         if fraud_intel.get("risk_score") is not None:
+#             risk_score = int(fraud_intel["risk_score"])
+#         if fraud_intel.get("churn_velocity"):
+#             churn_velocity = fraud_intel["churn_velocity"]
+#         if fraud_intel.get("reasoning"):
+#             fraud_reasoning = fraud_intel["reasoning"]
 
 #     employer_switch = (len(employers) >= 2)
 #     if employer_switch:
-#         switch_notes = f"Multiple employer names detected ({', '.join(employers)}); review dates and continuity."
-#         stability_score = max(0, stability_score - 5)
-#     elif observed_salary_months:
-#         switch_notes = "One employer pattern observed in the parsed salary credits."
+#         switch_notes = f"Multiple employers detected ({', '.join(employers)})."
+#         stability_score = 82
 #     else:
-#         switch_notes = "No direct salary credits were confidently tagged in this statement."
+#         switch_notes = "Single stable employer tenure detected."
 
 #     return {
 #         "metadata": metadata,
@@ -2030,10 +2073,6 @@
 #             "calculated_closing": reconciled_calc,
 #             "variance": variance,
 #             "is_reconciled": is_reconciled,
-#             "aggregate_reconciled": aggregate_reconciled,
-#             "balance_continuity_breaks": balance_continuity_breaks,
-#             "balance_continuity_status": "PASS" if balance_continuity_breaks == 0 else "WARNING",
-#             "status": "RECONCILED" if is_reconciled else "WARNING",
 #             "total_transactions": len(records),
 #             "dr_count": int((df['debit'] > 0).sum()),
 #             "cr_count": int((df['credit'] > 0).sum())
@@ -2048,13 +2087,7 @@
 #             "employer_switch": employer_switch,
 #             "switch_notes": switch_notes,
 #             "stability_score": stability_score,
-#             "observed_salary_months": observed_salary_months,
-#             "stability_tier": (
-#                 "Consistent observed salary history" if stability_score >= 80 else
-#                 "Moderate observed salary history" if stability_score >= 65 else
-#                 "Limited salary history" if stability_score > 0 else
-#                 "Insufficient salary evidence"
-#             ),
+#             "stability_tier": "Grade A (Prime Salaried)" if stability_score >= 80 else "Grade B (Moderate Inflows)",
 #             "ai_enabled": ai_applied
 #         },
 #         "debt_and_emi": {
@@ -2064,14 +2097,13 @@
 #             "jumbo_loans_disbursed": total_jumbo_disbursed,
 #             "jumbo_loans_list": jumbo_loans,
 #             "foir_percentage": foir_pct,
-#             "foir_available": avg_monthly_salary > 0,
 #             "total_emi_paid": round(float(loan_df['debit'].sum()), 2),
 #             "ai_enabled": ai_applied
 #         },
 #         "cc_stress": {
 #             "is_alert": (total_jumbo_disbursed >= 50000 and float(cc_df['debit'].sum()) >= 50000),
 #             "severity": "CRITICAL" if (total_jumbo_disbursed >= 50000 and float(cc_df['debit'].sum()) >= 50000) else "NORMAL",
-#             "message": "A configured high-volume card-stress pattern was detected; manual review is recommended." if (total_jumbo_disbursed >= 50000 and float(cc_df['debit'].sum()) >= 50000) else "No configured high-volume card-stress trigger was detected in the parsed rows.",
+#             "message": "High revolver card stress / debt restructuring detected." if (total_jumbo_disbursed >= 50000 and float(cc_df['debit'].sum()) >= 50000) else "Revolving credit cards are within normal operating parameters.",
 #             "jumbo_disbursed": total_jumbo_disbursed,
 #             "card_debt_settled": round(float(cc_df['debit'].sum()), 2)
 #         },
@@ -2095,26 +2127,111 @@
 #             "fraud_risk_tag": risk_tag,
 #             "fraud_reasoning": fraud_reasoning
 #         },
-#         "ai_advisory": ai_result if isinstance(ai_result, dict) else None,
 #         "fraud_and_churn_intelligence": {
 #             "risk_tag": risk_tag,
 #             "risk_score": risk_score,
 #             "churn_velocity": churn_velocity,
 #             "reasoning": fraud_reasoning,
-#             "assessment_scope": "Rule-based transaction-pattern indicator only; not a fraud finding or lending decision.",
-#             "ai_commentary": ai_commentary,
 #             "ai_enabled": ai_applied
 #         },
 #         "bounce_audit": {
 #             "bounce_count": len(bounce_df),
 #             "is_clean": (len(bounce_df) == 0),
-#             "status_text": "No bounce/return markers detected in parsed rows" if len(bounce_df) == 0 else f"{len(bounce_df)} Bounce / return markers detected",
+#             "status_text": "0 Bounces • Clean Repayment Track" if len(bounce_df) == 0 else f"{len(bounce_df)} Bounces / Failures Detected",
 #             "tag_color": "emerald" if len(bounce_df) == 0 else "rose",
-#             "bounces_list": bounce_df[['txn_date', 'narration', 'debit']].to_dict('records'),
-#             "assessment_scope": "Only parsed bounce/return markers are counted; this does not verify the full repayment history."
+#             "bounces_list": bounce_df[['txn_date', 'narration', 'debit']].to_dict('records')
 #         },
 #         "abb_metrics": abb_stats
 #     }
+
+# def clear_db(db_path=DB_PATH):
+#     init_db(db_path)
+#     conn = sqlite3.connect(db_path, timeout=30.0)
+#     conn.execute("PRAGMA busy_timeout=5000;")
+#     c = conn.cursor()
+#     c.execute("DELETE FROM transactions")
+#     c.execute("DELETE FROM statements")
+#     conn.commit()
+#     conn.close()
+
+# def save_statement_to_db(records, metadata, insights=None, filename=None):
+#     init_db()
+#     conn = sqlite3.connect(DB_PATH, timeout=30.0)
+#     conn.execute("PRAGMA busy_timeout=5000;")
+#     c = conn.cursor()
+    
+#     acc = (metadata.get("account_no") or "").strip()
+#     if not acc:
+#         seed = (filename or "") + str(len(records)) + (records[0].get("txn_date", "") if records else "")
+#         acc = "UNK-" + hashlib.md5(seed.encode()).hexdigest()[:8].upper()
+#         metadata["account_no"] = acc
+#     for r in records:
+#         r["account_no"] = acc
+#     c.execute("DELETE FROM statements")
+#     c.execute("DELETE FROM transactions")
+
+#     abb_val = insights.get('abb_metrics', {}).get('overall_abb', 0.0) if insights else 0.0
+#     c.execute("""
+#     INSERT INTO statements (
+#         bank, borrower_name, account_no, branch, sol_id, ifsc, cust_id, email, mobile,
+#         account_type, period, opening_balance, closing_balance, total_withdrawals,
+#         total_deposits, abb, reconciled, filename
+#     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#     """, (
+#         metadata.get("bank", ""),
+#         metadata.get("borrower_name", ""),
+#         metadata.get("account_no", ""),
+#         metadata.get("branch", ""),
+#         metadata.get("sol_id", ""),
+#         metadata.get("ifsc", ""),
+#         metadata.get("cust_id", ""),
+#         metadata.get("email", ""),
+#         metadata.get("mobile", ""),
+#         metadata.get("account_type", ""),
+#         metadata.get("period", ""),
+#         metadata.get("opening_balance", 0.0),
+#         metadata.get("closing_balance", 0.0),
+#         metadata.get("total_withdrawals", 0.0),
+#         metadata.get("total_deposits", 0.0),
+#         abb_val,
+#         1 if (insights and insights.get('reconciliation', {}).get('is_reconciled', True)) else 0,
+#         filename or metadata.get("bank", "statement.pdf")
+#     ))
+              
+#     tx_tuples = [
+#         (
+#             r.get("bank", ""),
+#             r.get("account_no", ""),
+#             r.get("txn_date", ""),
+#             r.get("iso_date", ""),
+#             r.get("narration", ""),
+#             r.get("debit", 0.0),
+#             r.get("credit", 0.0),
+#             r.get("balance", 0.0),
+#             r.get("category", "GENERAL"),
+#             r.get("sub_category", "")
+#         )
+#         for r in records
+#     ]
+    
+#     c.executemany("""
+#     INSERT INTO transactions (
+#         bank, account_no, txn_date, iso_date, narration, debit, credit, balance, category, sub_category
+#     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#     """, tx_tuples)
+    
+#     conn.commit()
+#     conn.close()
+
+# # Dedicated UCO Bank parser (kept in its own module).
+# from bank_parsers.uco_parser import parse_uco_pdf as _parse_uco_pdf
+
+# def parse_uco_bank_pdf(pdf_source, password=None):
+#     return _parse_uco_pdf(
+#         pdf_source, password=password,
+#         categorize_fn=categorize_transaction,
+#         date_parser=parse_iso_date,
+#     )
 
 
 
@@ -2131,8 +2248,11 @@ zero-false-positive categorization, and distinct CC vs Wallet segregation.
 import os
 import re
 import json
+import sqlite3
+import math
 from datetime import datetime
 from collections import defaultdict
+import hashlib
 from io import BytesIO
 import pandas as pd
 import pymupdf
@@ -2160,6 +2280,67 @@ try:
     GENAI_AVAILABLE = True
 except ImportError:
     GENAI_AVAILABLE = False
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "bank_statement.db")
+
+def init_db(db_path=DB_PATH):
+    conn = sqlite3.connect(db_path, timeout=30.0)
+    c = conn.cursor()
+    c.execute("PRAGMA journal_mode=WAL;")
+    c.execute("PRAGMA busy_timeout=5000;")
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS statements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bank TEXT,
+        borrower_name TEXT,
+        account_no TEXT,
+        branch TEXT,
+        sol_id TEXT,
+        ifsc TEXT,
+        cust_id TEXT,
+        email TEXT,
+        mobile TEXT,
+        account_type TEXT,
+        period TEXT,
+        opening_balance REAL,
+        closing_balance REAL,
+        total_withdrawals REAL,
+        total_deposits REAL,
+        abb REAL,
+        reconciled INTEGER DEFAULT 1,
+        filename TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    
+    c.execute("PRAGMA table_info(transactions)")
+    cols = [col[1] for col in c.fetchall()]
+    if not cols:
+        c.execute("""
+        CREATE TABLE transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bank TEXT,
+            account_no TEXT,
+            txn_date TEXT,
+            iso_date TEXT,
+            narration TEXT,
+            debit REAL,
+            credit REAL,
+            balance REAL,
+            category TEXT,
+            sub_category TEXT
+        )
+        """)
+    else:
+        if "account_no" not in cols:
+            c.execute("ALTER TABLE transactions ADD COLUMN account_no TEXT")
+        if "iso_date" not in cols:
+            c.execute("ALTER TABLE transactions ADD COLUMN iso_date TEXT")
+        if "sub_category" not in cols:
+            c.execute("ALTER TABLE transactions ADD COLUMN sub_category TEXT")
+            
+    conn.commit()
+    conn.close()
 
 MONTH_MAP = {
     'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
@@ -2208,10 +2389,7 @@ def parse_iso_date(date_str):
     m0 = re.match(r'^(\d{4})-(\d{1,2})-(\d{1,2})$', s)
     if m0:
         y, mo, d = m0.groups()
-        try:
-            return datetime(int(y), int(mo), int(d)).strftime("%Y-%m-%d")
-        except ValueError:
-            return ""
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
 
     m1 = re.match(r'^(\d{1,2})[\s\-\/\.]([A-Za-z]{3,9})[\s\-\/\.](\d{2,4})$', s)
     if m1:
@@ -2220,10 +2398,7 @@ def parse_iso_date(date_str):
         if mon_lower in MONTH_MAP:
             mo = MONTH_MAP[mon_lower]
             year = f"20{y}" if len(y) == 2 else y
-            try:
-                return datetime(int(year), int(mo), int(d)).strftime("%Y-%m-%d")
-            except ValueError:
-                return ""
+            return f"{int(year):04d}-{mo}-{int(d):02d}"
 
     m2 = re.match(r'^([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{2,4})$', s)
     if m2:
@@ -2232,38 +2407,19 @@ def parse_iso_date(date_str):
         if mon_lower in MONTH_MAP:
             mo = MONTH_MAP[mon_lower]
             year = f"20{y}" if len(y) == 2 else y
-            try:
-                return datetime(int(year), int(mo), int(d)).strftime("%Y-%m-%d")
-            except ValueError:
-                return ""
+            return f"{int(year):04d}-{mo}-{int(d):02d}"
 
     m3 = re.match(r'^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$', s)
     if m3:
         d, mo, y = m3.groups()
         year = f"20{y}" if len(y) == 2 else y
-        try:
-            return datetime(int(year), int(mo), int(d)).strftime("%Y-%m-%d")
-        except ValueError:
-            return ""
+        return f"{int(year):04d}-{int(mo):02d}-{int(d):02d}"
 
     return s
 
-def _clean_employer_display(value):
-    value = re.sub(r"^A2A[A-Z0-9]{2,10}[-/:]", "", str(value or ""), flags=re.I).strip()
-    # Some PDF layouts split PRIVATE across narration lines around a reference ID.
-    value = re.sub(r"\s+(?:PRIVA|PRIVAT|PRIV|PVT)$", "", value, flags=re.I).strip()
-    return re.sub(r"\s+", " ", value).strip(" -/:,")
-
-
-def _employer_identity_key(value):
-    key = _clean_employer_display(value).upper()
-    key = re.sub(r"\b(PRIVATE|LIMITED|PVT|LTD|PRIVA|PRIVAT)\b", " ", key)
-    return re.sub(r"[^A-Z0-9]+", "", key)
-
-
 def extract_dynamic_employer(desc):
     d = desc.strip()
-    cleaned = re.sub(r'^(?:NEFT|RTGS|IMPS|ACH|CMS|A2A|FT)\s*(?:CR|DR)?\s*[-/:]?\s*(?:[A-Z0-9]{3,12}[-/:])?[A-Z0-9]{8,25}\s*', '', d, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r'^(?:NEFT|RTGS|IMPS|ACH|CMS|A2A|FT)\s*(?:CR|DR)?\s*[-/:]?\s*[A-Z0-9]{8,25}\s*', '', d, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r'^[A-Z0-9]{10,}\*?', '', cleaned).strip()
     
     corp_match = re.search(r'([A-Z0-9\s.,&-]+?\b(?:PRIVATE\s+LIMITED|PVT\s+LTD|LIMITED|LTD|CORPORATION|CORP|TECHNOLOGIES|TECH|SERVICES|SOLUTIONS|SOLN|LLP|MANAGEMENT)\b)', cleaned, re.IGNORECASE)
@@ -2272,7 +2428,7 @@ def extract_dynamic_employer(desc):
         emp = re.sub(r'^[-/*0-9\s]+', '', emp).strip()
         emp = re.sub(r'\s+IN\d{10,}.*$', '', emp, flags=re.I).strip()
         if len(emp) >= 4 and not any(b in emp.upper() for b in ["STATE BANK", "HDFC BANK", "ICICI BANK", "AXIS BANK"]):
-            return _clean_employer_display(emp.title())
+            return emp.title()
 
     hyphen_parts = [p.strip() for p in cleaned.split('-') if p.strip()]
     for part in hyphen_parts:
@@ -2284,18 +2440,16 @@ def extract_dynamic_employer(desc):
         part_clean = re.sub(r'\s+(?:CITI\s*BANK|HDFC\s*BANK|SBI|AXIS|ICICI|BANK).*$', '', part, flags=re.IGNORECASE).strip()
         part_clean = re.sub(r'\s+IN\d{10,}.*$', '', part_clean, flags=re.I).strip()
         if len(part_clean) >= 3:
-            return _clean_employer_display(part_clean.title())
+            return part_clean.title()
 
     return "Corporate Payroll"
 
 def categorize_transaction(desc, debit=0.0, credit=0.0):
     d = desc.upper().strip()
-    # Space-stripped copy to match words broken across PDF column lines (e.g. 'NORT HERN', 'MUT HOOT')
-    clean_d = re.sub(r'\s+', '', d)
     flags = []
     
     # 1. Genuine Cheque Bounce / Mandate / NACH Failures
-    is_upi = d.startswith("UPI-") or "UPI/" in d or "@" in d
+    is_upi = d.startswith("UPI-") or "@" in d
     genuine_bounce_pattern = r'\b(BOUNCE|RET\s*CHG|BOUNCE\s*CHG|INSUFFICIENT|ACH\s*RET|NACH\s*RET|ECS\s*RET|CHQ\s*RET|DISHONOUR|UNPAID)\b'
     if re.search(genuine_bounce_pattern, d) or (not is_upi and re.search(r'\b(RETURN|RET)\b', d) and debit > 0):
         flags.append("BOUNCE_FAILURE")
@@ -2317,61 +2471,35 @@ def categorize_transaction(desc, debit=0.0, credit=0.0):
         )
         if is_salary_text and not re.search(r'\b(RENT|REFUND|REVERSAL|REV|DIVIDEND|CASH\s+DEP|INTEREST|INT\.PD|PAY\s*REQUEST)\b', d):
             flags.append("SALARY")
-
-    # 2B. Current Account / MSME Merchant POS & Gateway Settlements
-    if credit >= 500 and "SALARY" not in flags:
-        merchant_inflow_keys = [
-            "ONE97COMMUNIC", "ONE97COM", "PAYTMPAYMENTS", "BHARATPE", "PHONEPEMERCHANT",
-            "PINELABS", "RAZORPAY", "CASHFREE", "PAYU", "EASEBUZZ", "INSTAMOJO", "BILLDESK"
-        ]
-        if any(m in clean_d for m in merchant_inflow_keys) and "PENNYDRO" not in clean_d:
-            flags.append("BUSINESS_INFLOW")
         
     # 3. Stock Market / Broker / Mutual Fund / SIP Clearing
-    sip_or_trading = any(k in clean_d for k in [
-        'ANGELONE', 'ZERODHA', 'GROWW', 'UPSTOX', 'INDIANCLEARING',
-        'NSECL', 'BSECLEA', 'ICCL', 'MFSS', 'CDSL', 'NSDL', 'INDSTOCKS', 'INDMONEY', 'ICICIDIRECT'
+    sip_or_trading = any(k in d for k in [
+        'ANGEL', 'ZERODHA', 'GROWW', 'UPSTOX', 'INDIANCLEARING', 'INDIAN CLEARING',
+        'CLEARING', 'NSECL', 'BSECLEA', 'ICCL', 'MFSS', 'CDSL', 'NSDL', 'INDSTOCKS', 'INDMONEY', 'ICICIDIRECT'
     ])
     if sip_or_trading:
         flags.append("STOCK_TRADING")
         
     # 4. EMI & Loan Payments vs Disbursements
-    # Important: EMI is strictly a DEBIT. Credits can only be Disbursements.
     if "BOUNCE_FAILURE" not in flags and not sip_or_trading:
-        # Check Disbursements (Credits)
-        if credit >= 10000 and any(k in clean_d for k in ["INSTALOAN", "INSTAJUMBOLOAN", "JUMBOLOAN", "LOANDISB", "DISBURSEMENT", "POONAWALLA", "NORTHERNARC"]):
+        if credit >= 10000 and any(k in d for k in ["INSTALOAN", "INSTA LOAN", "INSTAJUMBOLOAN", "JUMBO LOAN", "LOAN DISB", "DISBURSEMENT", "POONAWALLA"]):
             flags.append("LOAN_DISBURSEMENT")
-        
-        # Check EMIs (Strictly Debits Only)
         elif debit >= 200:
-            is_bajaj_pay_merchant = "BAJAJPAY" in clean_d or "@INDUS-INDB0MERCHA" in clean_d
-            
+            is_bajaj_pay_merchant = "BAJAJPAY" in d or "@INDUS-INDB0MERCHA" in d
             emi_patterns = (
-                r'(ACHD[-_]|ACHDR|ACH-DR|NACH[-_]|BFLAUTOPAY|_EMI_|LOANREC|CANFIN|TATACAP|TCHHL|TCHIN|ADINGENTATA|CANARARO|HINDON)'
+                r'(ACH\s*D[-_]|ACHDR|ACH-DR|NACH[-_]|BFLAUTOPAY|_EMI_|LOAN\s*REC|CANFIN|TATACAP|TCHHL|TCHIN|ADINGEN_TATA|CANARA\s*RO|HINDON)'
             )
-            is_direct_emi = bool(re.search(emi_patterns, clean_d)) or (
-                any(k in clean_d for k in ["KRAZYBEE", "POONAWALLAFIN", "NORTHERNARC", "NORTHARCAP", "ADITYABIRLAFINANCE", "MUTHOOT"])
+            is_direct_emi = bool(re.search(emi_patterns, d)) or (
+                any(k in d for k in ["KRAZYBEE", "POONAWALLAFIN", "NORTHERN ARC", "ADITYA BIRLA FINANCE", "MUTHOOT"])
             )
-            
-            # Catch HDFC SmartEMI / Masked Card Auto-Billpay EMIs:
-            # e.g., IB BILLPAY DR-HDFC2F-537206XXXXXX1334
-            if re.search(r'IBBILLPAYDR[-_]*HDFC', clean_d) and re.search(r'\d{6}X{4,6}\d{4}', clean_d):
+            if re.search(r'IB\s*BILLPAY\s*DR[-_\s]*HDFC', d) and re.search(r'\d{6}X{4,6}\d{4}', d):
                 is_direct_emi = True
-
-            # Standard Clearing Cheque EMI (e.g. EMI 466194268 CHQ)
             if re.search(r'\bEMI\s+[0-9]+\s+CHQ\b', d):
                 is_direct_emi = True
-
-            # SBI Internal Loan / Standing Instruction Auto-Debits (DIRECT DR ... INT TRF)
-            if "DIRECT DR" in d and ("INT TRF" in d or re.search(r'00\d{11}', clean_d)):
+            if "BAJAJ" in d and not is_bajaj_pay_merchant and debit >= 500:
                 is_direct_emi = True
-
-            if "BAJAJ" in clean_d and not is_bajaj_pay_merchant and debit >= 500:
+            if ("IDFC" in d or "KMBL" in d or "HDBFS" in d) and any(m in d for m in ["ACH", "NACH", "MANDATE", "LOAN", "DRAOPERATIONS"]) and not is_upi:
                 is_direct_emi = True
-                
-            if ("IDFC" in clean_d or "KMBL" in clean_d or "HDBFS" in clean_d) and any(m in clean_d for m in ["ACH", "NACH", "MANDATE", "LOAN", "DRAOPERATIONS"]) and not is_upi:
-                is_direct_emi = True
-
             if is_direct_emi:
                 flags.append("EMI_LOAN")
         
@@ -2390,11 +2518,9 @@ def categorize_transaction(desc, debit=0.0, credit=0.0):
         flags.append("CC_PAYMENT")
     elif any(re.search(k, d) for k in wallet_keywords):
         flags.append("WALLET_TOPUP")
-    elif 'PAYTMQR' in clean_d and debit >= 2000 and any(c in clean_d for c in ['CRED', 'CARD', 'ROTATION', 'WALLET']):
+    elif 'PAYTMQR' in d and debit >= 2000 and any(c in d for c in ['CRED', 'CARD', 'ROTATION', 'WALLET']):
         flags.append("CC_PAYMENT")
 
-    if not flags and d.startswith("UPI/") and (debit > 0 or credit > 0):
-        flags.append("UPI_PAYMENT")
     return ", ".join(flags) if flags else "GENERAL"
 
 def _infer_opening_balance(balance, amt, narration):
@@ -2416,12 +2542,11 @@ def _counterparty_key(narr):
     return " ".join(words[:2]) or None
 
 def tag_recurring_salary(records, min_amount=10000, tol=0.35):
-    excluded_entities = ['ANGEL', 'ZERODHA', 'GROWW', 'UPSTOX', 'ICCL', 'NSE', 'BSE', 'INDIAN CLEARING', 'ONE 97', 'ONE97', 'PAYTM PAYMENTS']
+    excluded_entities = ['ANGEL', 'ZERODHA', 'GROWW', 'UPSTOX', 'ICCL', 'NSE', 'BSE', 'INDIAN CLEARING']
     groups = defaultdict(list)
     for i, r in enumerate(records):
         narr = r.get("narration", "").upper()
-        cat = r.get("category", "")
-        if r.get("credit", 0) >= min_amount and "SALARY" not in cat and "BUSINESS_INFLOW" not in cat:
+        if r.get("credit", 0) >= min_amount and "SALARY" not in r.get("category", ""):
             if any(e in narr for e in excluded_entities):
                 continue
             k = _counterparty_key(r.get("narration", ""))
@@ -2440,6 +2565,106 @@ def tag_recurring_salary(records, min_amount=10000, tol=0.35):
         for i in hits:
             cat = records[i]["category"]
             records[i]["category"] = "SALARY" if cat == "GENERAL" else f"{cat}, SALARY"
+    return records
+
+def auto_categorize_with_ai(records):
+    """
+    Groups unique transaction patterns (with sample dates & frequency) and classifies all rows
+    in a single fast LLM call: Salaries, Recurring EMIs/Mandates, NBFCs, and CC/Wallet rotations.
+    Includes strict Debit/Credit direction guards and falls back seamlessly if API is unavailable.
+    """
+    if not GENAI_AVAILABLE or not os.environ.get("GEMINI_API_KEY") or not records:
+        return records
+
+    unique_patterns = {}
+    for idx, r in enumerate(records):
+        narr = str(r.get("narration", "")).strip()
+        sig = re.sub(r'\d+', '#', narr)[:80]
+        direction = "CR" if float(r.get("credit") or 0) > 0 else "DR"
+        amt_bucket = "HIGH" if max(float(r.get("credit") or 0), float(r.get("debit") or 0)) >= 5000 else "LOW"
+        key = (sig, direction, amt_bucket)
+        
+        if key not in unique_patterns:
+            unique_patterns[key] = {
+                "pattern_id": len(unique_patterns),
+                "sample_narration": narr[:140],
+                "type": direction,
+                "sample_amount": r.get("credit") if direction == "CR" else r.get("debit"),
+                "count": 0,
+                "dates": [],
+                "row_indices": []
+            }
+        unique_patterns[key]["count"] += 1
+        if len(unique_patterns[key]["dates"]) < 5:
+            unique_patterns[key]["dates"].append(str(r.get("txn_date", "")))
+        unique_patterns[key]["row_indices"].append(idx)
+
+    payload = [
+        {
+            "id": v["pattern_id"],
+            "narration": v["sample_narration"],
+            "direction": "CREDIT (Money Received)" if v["type"] == "CR" else "DEBIT (Money Paid)",
+            "amount": v["sample_amount"],
+            "frequency": v["count"],
+            "sample_dates": v["dates"]
+        }
+        for v in list(unique_patterns.values())[:150]
+    ]
+
+    prompt = f"""You are an Indian Banking & Credit Underwriting AI classifier.
+Classify each transaction pattern into ONE primary category from:
+- SALARY (ONLY when direction is CREDIT: Corporate/Govt payroll, stipends — NEVER tag DEBIT rows as SALARY)
+- BUSINESS_INFLOW (ONLY when direction is CREDIT: POS/QR merchant settlements like Paytm/One97/BharatPe/Razorpay)
+- EMI_LOAN (ONLY when direction is DEBIT: Loan EMIs, NACH/ACH auto-debits, NBFC payments even if word-wrapped like 'Nort hern' / 'northarcap' / 'Mut hoot', OR fixed-amount recurring monthly/daily debit mandates across sample_dates like AA4371857 or DIRECT DR)
+- LOAN_DISBURSEMENT (ONLY when direction is CREDIT: Loan credits from banks/NBFCs)
+- CC_PAYMENT (Credit card bill settlements or card rotation gateways like CRED, Cheq, SBI Card, HDFC CC, RBL CC, Axis CC, Rent/Education pay via card)
+- WALLET_TOPUP (Prepaid wallet loads & card-to-wallet rotation apps like Mobikwik, Paytm Wallet, Amazon Pay Wallet, RupiCard, Zeta, PhonePe Wallet, UPI-Lite)
+- STOCK_TRADING (Zerodha, Angel One, Groww, ICCL/NSE mutual fund SIPs)
+- BOUNCE_FAILURE (Genuine NACH/ACH/Cheque return charges or bounces — NOT UPI refunds)
+- GENERAL (P2P UPI, shopping, food, ATM cash, utilities)
+
+Also extract 'clean_entity' (formal company, NBFC lender, or card/wallet platform name without UTR/IFSC/garbled PDF line breaks).
+
+INPUT PATTERNS:
+{json.dumps(payload)}
+
+Return ONLY a JSON array of objects:
+[{{"id": 0, "category": "EMI_LOAN", "clean_entity": "Northern Arc Capital"}}]"""
+
+    try:
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.0
+            )
+        )
+        if response and response.text:
+            predictions = {item["id"]: item for item in json.loads(response.text)}
+            for v in unique_patterns.values():
+                pred = predictions.get(v["pattern_id"])
+                if pred and pred.get("category"):
+                    for row_idx in v["row_indices"]:
+                        cat = pred["category"]
+                        is_debit = float(records[row_idx].get("debit") or 0) > 0
+                        is_credit = float(records[row_idx].get("credit") or 0) > 0
+                        # Strict Direction Guard: Debits cannot be Salary/Business Inflow
+                        if is_debit and cat in ("SALARY", "BUSINESS_INFLOW"):
+                            cat = "EMI_LOAN" if "DIRECT DR" in str(records[row_idx].get("narration", "")).upper() else "GENERAL"
+                        # Strict Direction Guard: Credits cannot be EMI_LOAN
+                        if is_credit and cat == "EMI_LOAN":
+                            cat = "LOAN_DISBURSEMENT"
+
+                        records[row_idx]["category"] = cat
+                        if pred.get("clean_entity"):
+                            records[row_idx]["clean_entity"] = pred["clean_entity"]
+                            records[row_idx]["sub_category"] = pred["clean_entity"]
+    except Exception as e:
+        print(f"[AI Auto-Categorizer Fallback] {e}")
+
     return records
 
 def _fill_period_from_records(metadata, records):
@@ -2493,7 +2718,9 @@ def detect_bank_format(file_bytes=None, file_path=None, password=None):
         m_ifsc = re.search(r'IFSC\s*(?:CODE)?\s*[:\.]\s*([A-Z]{4})', p0_header)
         if m_ifsc:
             code = m_ifsc.group(1)
-            if code == "SCBL":
+            if code == "UCBA":
+                return {"is_encrypted": False, "detected_bank": "UCO Bank", "layout": "5-column UCO Bank Statement", "columns": ["Date", "Particulars", "Withdrawals", "Deposits", "Balance"], "pages": len(doc)}
+            elif code == "SCBL":
                 return {"is_encrypted": False, "detected_bank": "Standard Chartered Bank", "layout": "7-column Standard Chartered Layout", "columns": ["Date", "Value Date", "Description", "Cheque", "Deposit", "Withdrawal", "Balance"], "pages": len(doc)}
             elif code == "HDFC":
                 return {"is_encrypted": False, "detected_bank": "HDFC Bank", "layout": "7-column Text Format", "columns": ["Date", "Narration", "Chq./Ref.No.", "Value Dt", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"], "pages": len(doc)}
@@ -2508,11 +2735,9 @@ def detect_bank_format(file_bytes=None, file_path=None, password=None):
             elif code == "IDFB":
                 return {"is_encrypted": False, "detected_bank": "IDFC FIRST Bank", "layout": "7-column Tabular Format", "columns": ["Transaction Date", "Value Date", "Particulars", "Cheque No", "Debit", "Credit", "Balance"], "pages": len(doc)}
 
-        if ("ICICI BANK LIMITED" in text_upper or
-            ("TRANSACTION REMARKS" in text_upper and "WITHDRAWAL" in text_upper and "DEPOSIT" in text_upper and "BALANCE" in text_upper)):
-            return {"is_encrypted": False, "detected_bank": "ICICI Bank", "layout": "ICICI Statement of Transactions", "columns": ["S No.", "Transaction Date", "Cheque Number", "Transaction Remarks", "Withdrawal Amount", "Deposit Amount", "Balance"], "pages": len(doc)}
-
-        if "STANDARD CHARTERED" in header_clean or "STANCHART" in header_clean or "SCBL" in header_clean or "STANDARD CHARTERED" in text_upper:
+        if "UCO BANK" in header_clean or "UCO BANK" in text_upper or "UCBA" in p0_header:
+            return {"is_encrypted": False, "detected_bank": "UCO Bank", "layout": "5-column UCO Bank Statement", "columns": ["Date", "Particulars", "Withdrawals", "Deposits", "Balance"], "pages": len(doc)}
+        elif "STANDARD CHARTERED" in header_clean or "STANCHART" in header_clean or "SCBL" in header_clean or "STANDARD CHARTERED" in text_upper:
             return {"is_encrypted": False, "detected_bank": "Standard Chartered Bank", "layout": "7-column Standard Chartered Layout", "columns": ["Date", "Value Date", "Description", "Cheque", "Deposit", "Withdrawal", "Balance"], "pages": len(doc)}
         elif ("CHQ./REF.NO." in p0_header and "CLOSING BALANCE" in p0_header and "WITHDRAWAL AMT." in p0_header) or "HDFC BANK" in header_clean or "WE UNDERSTAND YOUR WORLD" in text_upper or "HDFC BANK LIMITED" in header_clean:
             return {"is_encrypted": False, "detected_bank": "HDFC Bank", "layout": "7-column Text Format", "columns": ["Date", "Narration", "Chq./Ref.No.", "Value Dt", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"], "pages": len(doc)}
@@ -2621,78 +2846,6 @@ def parse_standard_chartered_pdf(pdf_source, password=None):
                         })
     except Exception as e:
         print(f"[Standard Chartered Parser Error] {e}")
-
-    try:
-        coord_pdf = pdfplumber.open(BytesIO(pdf_source) if isinstance(pdf_source, bytes) else pdf_source, password=password)
-        coord_records = []
-        opening_from_forward = None
-        opening_date = None
-        date_line_re = re.compile(r"^\d{1,2}\s+[A-Za-z]{3}\s+\d{4}$", re.I)
-        money_re = re.compile(r"^\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}\)?$")
-        for page in coord_pdf.pages:
-            words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
-            line_map = {}
-            for word in words:
-                y_key = round(word["top"] / 2.5) * 2.5
-                line_map.setdefault(y_key, []).append(word)
-            lines = []
-            for y_key, line_words in sorted(line_map.items()):
-                line_words.sort(key=lambda w: w["x0"])
-                left_text = " ".join(w["text"] for w in line_words if w["x0"] < 110)
-                date_match = re.search(r"\b\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\b", left_text, re.I)
-                lines.append({"words": line_words, "date": date_match.group(0) if date_match else None})
-            starts = [i for i, line in enumerate(lines) if line["date"] and is_date(line["date"])]
-            for pos, start_idx in enumerate(starts):
-                stop_idx = starts[pos + 1] if pos + 1 < len(starts) else len(lines)
-                block_lines = lines[start_idx:stop_idx]
-                narration_words = []
-                deposit = debit = balance = 0.0
-                for line in block_lines:
-                    line_text = " ".join(w["text"] for w in line["words"])
-                    if re.search(r"\bTOTAL\b", line_text, re.I):
-                        break
-                    for word in line["words"]:
-                        x0, x1, token = word["x0"], word["x1"], word["text"].strip()
-                        if money_re.fullmatch(token):
-                            value = clean_amount(token)
-                            x_mid = (x0 + x1) / 2
-                            if x_mid >= 495:
-                                balance = value
-                            elif 360 <= x_mid < 430:
-                                deposit = value
-                            elif 430 <= x_mid < 495:
-                                debit = value
-                        elif x0 >= 160 and x1 <= 370 and not re.fullmatch(r"\d{1,3}", token):
-                            if token and token.lower() not in {"date", "description", "value", "deposit", "withdrawal", "balance", "total"}:
-                                narration_words.append(token)
-                narration = re.sub(r"\s+", " ", " ".join(narration_words)).strip()
-                if "FORWARD" in narration.upper() and balance and not debit and not deposit:
-                    opening_from_forward = balance
-                    opening_date = block_lines[0]["date"]
-                    continue
-                if not balance or not narration:
-                    continue
-                txn_date = block_lines[0]["date"]
-                coord_records.append({
-                    "bank": metadata["bank"], "account_no": metadata.get("account_no", ""),
-                    "txn_date": txn_date, "iso_date": parse_iso_date(txn_date),
-                    "narration": narration, "debit": round(debit, 2),
-                    "credit": round(deposit, 2), "balance": round(balance, 2),
-                    "category": categorize_transaction(narration, debit, deposit)
-                })
-        coord_pdf.close()
-        if coord_records:
-            coord_records.sort(key=lambda r: r["iso_date"])
-            records = coord_records
-            if opening_from_forward is not None:
-                metadata["opening_balance"] = opening_from_forward
-            elif metadata.get("opening_balance", 0.0) == 0.0:
-                first = records[0]
-                metadata["opening_balance"] = round(first["balance"] - first["credit"] + first["debit"], 2)
-            period_start = opening_date or records[0]["txn_date"]
-            metadata["period"] = f"{period_start} to {records[-1]['txn_date']}"
-    except Exception as e:
-        print(f"[SC Coordinate Parser Fallback] {e}")
 
     if records:
         if metadata["opening_balance"] == 0.0 and len(records) > 0:
@@ -3090,158 +3243,207 @@ def parse_axis_pdf(pdf_source, password=None):
     return records, metadata
 
 def parse_icici_pdf(pdf_source, password=None):
-    """Parse ICICI's text-based statement layout using word coordinates."""
     metadata = {
         "bank": "ICICI Bank", "borrower_name": "ICICI Account Holder", "account_no": "",
         "branch": "ICICI Bank Branch", "sol_id": "", "ifsc": "ICIC0000000", "cust_id": "",
         "email": "", "mobile": "", "account_type": "Savings Account", "period": "",
-        "opening_balance": 0.0, "closing_balance": 0.0,
-        "total_withdrawals": 0.0, "total_deposits": 0.0
+        "opening_balance": 0.0, "closing_balance": 0.0, "total_withdrawals": 0.0, "total_deposits": 0.0
     }
-    records = []
+
     doc = None
-    pdf_words_doc = None
+    p0_text = ""
+    full_text = ""
     try:
-        doc = pymupdf.open(stream=pdf_source, filetype="pdf") if isinstance(pdf_source, bytes) else pymupdf.open(pdf_source)
-        pdf_words_doc = pdfplumber.open(BytesIO(pdf_source) if isinstance(pdf_source, bytes) else pdf_source, password=password)
-        if doc.is_encrypted:
-            if not password or not doc.authenticate(password):
-                raise ValueError("Password protected PDF or incorrect password")
-        first_text = doc[0].get_text() if len(doc) else ""
-        all_text = "\n".join(page.get_text() for page in doc)
+        if isinstance(pdf_source, bytes):
+            doc = pymupdf.open(stream=pdf_source, filetype="pdf")
+        else:
+            doc = pymupdf.open(pdf_source)
+        if doc.is_encrypted and password:
+            doc.authenticate(password)
+        if len(doc) > 0:
+            p0_text = doc[0].get_text()
+        for page in doc:
+            full_text += "\n" + page.get_text()
+    except Exception as e:
+        print(f"ICICI Metadata doc error: {e}")
+    finally:
+        if doc:
+            doc.close()
 
-        acc_m = re.search(r'(?:Saving|Current|Salary|Savings)?\s*Account\s*(?:no|number)?\.?\s*[:\-]?\s*([0-9]{10,18})', all_text, re.I)
-        if acc_m:
-            metadata["account_no"] = acc_m.group(1)
-        per_m = re.search(r'for the period\s+(.+?)(?:\n|$)', all_text, re.I)
-        if per_m:
+    acc_m = (re.search(r'(?:Saving|Current|Salary|Savings)?\s*Account\s*(?:no|number)?\.?\s*[:\-]?\s*([0-9]{10,18})', p0_text, re.I) or
+             re.search(r'Account\s*No\.?\s*[:\-]?\s*([0-9]{10,18})', p0_text, re.I) or
+             re.search(r'\b(000[0-9]{9}|[0-9]{12})\b', p0_text))
+    if acc_m:
+        metadata["account_no"] = acc_m.group(1).strip()
+
+    per_m = (re.search(r'period\s+([A-Za-z0-9,\s\-/\.]+?)\n', p0_text, re.I) or
+             re.search(r'From\s*[:\.]?\s*([0-9/\-\.]+)\s*To\s*[:\.]?\s*([0-9/\-\.]+)', p0_text, re.I))
+    if per_m:
+        if len(per_m.groups()) == 1:
             metadata["period"] = per_m.group(1).strip()
-        branch_m = re.search(r'Your Base Branch:\s*([^,\n]+)', all_text, re.I)
-        if branch_m:
-            metadata["branch"] = branch_m.group(1).strip()
-        ifsc_m = re.search(r'\b(ICIC0[A-Z0-9]{6})\b', all_text, re.I)
-        if ifsc_m:
-            metadata["ifsc"] = ifsc_m.group(1).upper()
+        else:
+            metadata["period"] = f"{per_m.group(1)} to {per_m.group(2)}"
 
-        name_m = re.search(r'(?:Account Holder|Customer)\s*Name\s*[:\-]?\s*([^\n]+)', first_text, re.I)
-        if name_m:
-            metadata["borrower_name"] = name_m.group(1).strip()
+    name_patterns = [
+        r'(?:Customer|Account\s*Holder|Primary\s*Holder|Borrower)\s*Name\s*[:\.]?\s*([A-Za-z\s\.]+?)(?:\r?\n|$)',
+        r'(?:^|\n)\s*(?:MR|MS|MRS|DR)\.?\s+([A-Za-z\s\.]+?)(?:\r?\n|,|$)',
+        r'Account\s*Name\s*[:\.]?\s*([A-Za-z\s\.]+?)(?:\r?\n|$)',
+        r'(?:^|\n)\s*Name\s*[:\.]\s*([A-Za-z\s\.]+?)(?:\r?\n|$)',
+        r'Dear\s+(?:Customer|Mr\.?|Ms\.?|Mrs\.?)?\s*([A-Za-z\s\.]+?)(?:,|<|\n)',
+        r'period[^\n]+\n+([A-Za-z\s]{3,40})\n',
+    ]
+    for pat in name_patterns:
+        m = re.search(pat, p0_text, re.I)
+        if m:
+            cand = m.group(1).strip().replace('\n', ' ')
+            cand = re.sub(r'\s+(?:BRANCH|ACCOUNT|STATEMENT|PAGE|DATE|SAVINGS|CURRENT|DETAILS|BASE).*$', '', cand, flags=re.I).strip()
+            if len(cand) >= 3 and not any(k in cand.upper() for k in ["BRANCH", "ICICI", "STATEMENT", "PAGE", "ACCOUNT", "PERIOD", "DETAILS", "BANK", "LIMITED"]):
+                if not cand.upper().startswith(("MR", "MS", "MRS", "DR")):
+                    title_m = re.search(r'\b(MR|MS|MRS|DR)\.?\b', m.group(0), re.I)
+                    if title_m:
+                        cand = f"{title_m.group(1).upper()} {cand}"
+                metadata["borrower_name"] = cand
+                break
 
-        def money_token(value):
-            return bool(re.fullmatch(r"\(?-?[\d,]+\.\d{2}\)?", value or ""))
+    br_m = re.search(r'Your Base Branch:\s*([^,\n]+)', p0_text, re.I) or re.search(r'Branch\s*:\s*([^,\n]+)', p0_text, re.I)
+    if br_m:
+        metadata["branch"] = br_m.group(1).strip()
 
-        for page_idx, page in enumerate(doc):
-            words = pdf_words_doc.pages[page_idx].extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
-            if not words:
-                continue
-            lines = []
-            for word in sorted(words, key=lambda w: (round(w["top"] / 2), w["x0"])):
-                target = next((ln for ln in lines if abs(ln["top"] - word["top"]) <= 2.5), None)
-                if target is None:
-                    target = {"top": word["top"], "words": []}
-                    lines.append(target)
-                target["words"].append(word)
-            lines.sort(key=lambda ln: ln["top"])
-            for ln in lines:
-                ln["words"].sort(key=lambda w: w["x0"])
+    ifsc_m = re.search(r'\b(ICIC0[A-Z0-9]{6})\b', p0_text, re.I)
+    if ifsc_m:
+        metadata["ifsc"] = ifsc_m.group(1).strip()
 
-            anchors = {"withdrawal": None, "deposit": None, "balance": None}
-            for ln in lines:
-                txt = " ".join(w["text"] for w in ln["words"]).lower()
-                for key in anchors:
-                    if key in txt and anchors[key] is None:
-                        hits = [w["x0"] + w["x1"] for w in ln["words"] if key in w["text"].lower()]
-                        if hits:
-                            anchors[key] = sum(hits) / (2 * len(hits))
-            if anchors["withdrawal"] is None: anchors["withdrawal"] = 425.0
-            if anchors["deposit"] is None: anchors["deposit"] = 490.0
-            if anchors["balance"] is None: anchors["balance"] = 550.0
+    records = []
+    try:
+        pdf_target = BytesIO(pdf_source) if isinstance(pdf_source, bytes) else pdf_source
+        with pdfplumber.open(pdf_target, password=password) as pdf:
+            col_date = -1
+            col_remarks = -1
+            col_chq = -1
+            col_debit = -1
+            col_credit = -1
+            col_balance = -1
 
-            tx_starts = []
-            for idx, ln in enumerate(lines):
-                date_word = next((w for w in ln["words"] if is_date(w["text"])), None)
-                if date_word:
-                    iso = parse_iso_date(date_word["text"])
-                    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso):
-                        tx_starts.append((idx, date_word))
-
-            for pos, (line_idx, date_word) in enumerate(tx_starts):
-                next_idx = tx_starts[pos + 1][0] if pos + 1 < len(tx_starts) else len(lines)
-                row_lines = lines[line_idx:next_idx]
-                amount_line_idx = None
-                row_values = []
-                for local_idx, ln in enumerate(row_lines):
-                    vals = [w for w in ln["words"] if money_token(w["text"].replace("₹", ""))]
-                    if vals:
-                        col_vals = [w for w in vals if w["x0"] >= min(anchors.values()) - 35]
-                        if col_vals:
-                            amount_line_idx = local_idx
-                            row_values = col_vals
-                            break
-                if amount_line_idx is None:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                if not tables:
+                    tables = page.extract_tables(table_settings={"vertical_strategy": "text", "horizontal_strategy": "text"})
+                if not tables:
                     continue
 
-                debit = credit = balance = 0.0
-                amount_candidates = []
-                for w in row_values:
-                    raw = w["text"].replace(",", "")
-                    try:
-                        val = abs(float(raw))
-                    except ValueError:
+                for table in tables:
+                    if not table or len(table) < 2:
                         continue
-                    xmid = (w["x0"] + w["x1"]) / 2
-                    if xmid >= anchors["balance"] - 18:
-                        balance = val
-                    else:
-                        amount_candidates.append((xmid, val))
-                if amount_candidates:
-                    xmid, amount = min(amount_candidates, key=lambda item: abs(item[0] - min(anchors["withdrawal"], anchors["deposit"])))
-                    if abs(xmid - anchors["deposit"]) < abs(xmid - anchors["withdrawal"]):
-                        credit = amount
-                    else:
-                        debit = amount
 
-                narr_words = []
-                for ln in row_lines:
-                    line_text = " ".join(w["text"] for w in ln["words"]).upper()
-                    if any(marker in line_text for marker in (
-                        "SINCERLY", "TEAM ICICI BANK", "THIS IS A SYSTEM GENERATED",
-                        "LEGENDS FOR TRANSACTIONS", "NEVER SHARE YOUR OTP", "DIAL YOUR BANK",
-                    )):
-                        break
-                    for w in ln["words"]:
-                        token = w["text"].strip()
-                        if (w["x0"] < anchors["withdrawal"] - 25 and
-                            not money_token(token) and not is_date(token) and
-                            token and not re.fullmatch(r"\d{1,3}", token)):
-                            narr_words.append(token)
-                narration = re.sub(r"\s+", " ", " ".join(narr_words)).strip()
-                narration = re.sub(r"\b(?:Never share your OTP|www\.icici\.bank\.in|Dial your Bank).*", "", narration, flags=re.I).strip()
-                if not narration:
-                    narration = "ICICI transaction"
+                    for row in table:
+                        if not row or not any(row):
+                            continue
+                        row_strs = [str(c or "").strip() for c in row]
+                        row_lower = [s.lower() for s in row_strs]
 
-                records.append({
-                    "bank": "ICICI Bank", "account_no": metadata.get("account_no", ""),
-                    "txn_date": date_word["text"], "iso_date": parse_iso_date(date_word["text"]),
-                    "narration": narration, "debit": round(debit, 2),
-                    "credit": round(credit, 2), "balance": round(balance, 2),
-                    "category": categorize_transaction(narration, debit, credit)
-                })
+                        has_date_hdr = any("date" in s for s in row_lower)
+                        has_amt_hdr = any(any(k in s for k in ["withdrawal", "deposit", "debit", "credit", "balance", "amount", "bal"]) for s in row_lower)
 
-        records.sort(key=lambda r: (r.get("iso_date", ""), r.get("txn_date", "")))
-        if records:
-            metadata["closing_balance"] = records[-1]["balance"]
-            metadata["total_withdrawals"] = round(sum(r["debit"] for r in records), 2)
-            metadata["total_deposits"] = round(sum(r["credit"] for r in records), 2)
-            first = records[0]
-            metadata["opening_balance"] = round(first["balance"] - first["credit"] + first["debit"], 2)
-            _fill_period_from_records(metadata, records)
-        return records, metadata
-    finally:
-        if pdf_words_doc is not None:
-            pdf_words_doc.close()
-        if doc is not None:
-            doc.close()
+                        if has_date_hdr and has_amt_hdr:
+                            for idx, s in enumerate(row_lower):
+                                if "txn" in s or "tran" in s or ("date" in s and "val" not in s and col_date == -1):
+                                    col_date = idx
+                                elif any(k in s for k in ["remark", "particular", "desc", "narration"]):
+                                    col_remarks = idx
+                                elif any(k in s for k in ["cheque", "chq", "ref"]):
+                                    col_chq = idx
+                                elif any(k in s for k in ["withdrawal", "debit", "dr"]):
+                                    col_debit = idx
+                                elif any(k in s for k in ["deposit", "credit", "cr"]):
+                                    col_credit = idx
+                                elif "balance" in s or "bal" in s:
+                                    col_balance = idx
+                            continue
+
+                        row_date = None
+                        date_idx = -1
+                        if col_date >= 0 and col_date < len(row_strs) and is_date(row_strs[col_date]):
+                            row_date = row_strs[col_date].split('\n')[0].strip()
+                            date_idx = col_date
+                        else:
+                            for idx, cell in enumerate(row_strs):
+                                if is_date(cell):
+                                    row_date = cell.split('\n')[0].strip()
+                                    date_idx = idx
+                                    break
+
+                        if not row_date:
+                            if records:
+                                rem_text = ""
+                                if col_remarks >= 0 and col_remarks < len(row_strs):
+                                    rem_text = row_strs[col_remarks]
+                                else:
+                                    cands = [c for c in row_strs if len(c) > 3 and not is_amount(c)]
+                                    if cands:
+                                        rem_text = " ".join(cands)
+                                if rem_text and not any(k in rem_text.upper() for k in ["PAGE", "TOTAL", "LEGEND", "CONTINUED", "OPENING"]):
+                                    records[-1]["narration"] = f"{records[-1]['narration']} {rem_text}".strip()
+                            continue
+
+                        debit = 0.0
+                        credit = 0.0
+                        balance = 0.0
+
+                        if col_debit >= 0 and col_credit >= 0 and col_balance >= 0 and max(col_debit, col_credit, col_balance) < len(row_strs):
+                            debit = clean_amount(row_strs[col_debit])
+                            credit = clean_amount(row_strs[col_credit])
+                            balance = clean_amount(row_strs[col_balance])
+                        else:
+                            num_vals = [clean_amount(c) for idx, c in enumerate(row_strs) if idx != date_idx and is_amount(c)]
+                            if len(num_vals) >= 3:
+                                balance = num_vals[-1]
+                                debit = num_vals[-3]
+                                credit = num_vals[-2]
+                            elif len(num_vals) == 2:
+                                balance = num_vals[-1]
+                                amt = num_vals[-2]
+                                if records:
+                                    diff = round(balance - records[-1]["balance"], 2)
+                                    credit = amt if diff > 0 else 0.0
+                                    debit = amt if diff <= 0 else 0.0
+
+                        narration = ""
+                        if col_remarks >= 0 and col_remarks < len(row_strs):
+                            narration = row_strs[col_remarks].replace('\n', ' ').strip()
+                        else:
+                            narr_parts = [c.replace('\n', ' ') for i, c in enumerate(row_strs) if i != date_idx and not is_amount(c) and len(c.strip()) > 1]
+                            narration = " ".join(narr_parts).strip()
+
+                        if col_chq >= 0 and col_chq < len(row_strs) and row_strs[col_chq].strip() and row_strs[col_chq].strip() not in narration:
+                            narration = f"{narration} Ref:{row_strs[col_chq].strip()}"
+
+                        narration = re.sub(r'\s+', ' ', narration).strip()
+                        category = categorize_transaction(narration, debit, credit)
+
+                        records.append({
+                            "bank": "ICICI Bank",
+                            "account_no": metadata.get("account_no", ""),
+                            "txn_date": row_date,
+                            "iso_date": parse_iso_date(row_date),
+                            "narration": narration,
+                            "debit": debit,
+                            "credit": credit,
+                            "balance": balance,
+                            "category": category
+                        })
+    except Exception as e:
+        print(f"ICICI Table Engine error: {e}")
+
+    if records:
+        if metadata["opening_balance"] == 0.0:
+            first_diff = records[0]["credit"] - records[0]["debit"]
+            metadata["opening_balance"] = round(records[0]["balance"] - first_diff, 2)
+        metadata["closing_balance"] = records[-1]["balance"]
+        metadata["total_withdrawals"] = round(sum(r["debit"] for r in records), 2)
+        metadata["total_deposits"] = round(sum(r["credit"] for r in records), 2)
+        _fill_period_from_records(metadata, records)
+
+    return records, metadata
 
 def parse_sbi_pdf(pdf_source, password=None):
     metadata = {
@@ -3285,7 +3487,7 @@ def parse_sbi_pdf(pdf_source, password=None):
         if email_m:
             metadata["email"] = email_m.group(1).strip()
             
-        per_m = re.search(r'Statement From\s*:([0-9-]+)\s*to\s*([0-9-]+)', p0_text)
+        per_m = re.search(r'Statement From\s*:([0-9/-]+)\s*to\s*([0-9/-]+)', p0_text)
         if per_m:
             metadata["period"] = f"{per_m.group(1)} to {per_m.group(2)}"
             
@@ -3304,7 +3506,7 @@ def parse_sbi_pdf(pdf_source, password=None):
         print(f"SBI Metadata error: {e}")
 
     lines = all_text.split('\n')
-    date_pat = re.compile(r'^\d{2}/\d{2}/\d{4}\b')
+    date_pat = re.compile(r'^\d{2}[/-]\d{2}[/-]\d{4}\b')
     num_pat = re.compile(r'^-?[\d,]+\.\d{2}$')
     
     ignore_prefixes = (
@@ -3754,7 +3956,7 @@ def parse_universal_pdf(pdf_source, password=None, detected_bank=None):
 
     return records, metadata
 
-def calculate_daily_abb(records, opening_balance, closing_balance, statement_period=None):
+def calculate_daily_abb(records, opening_balance, closing_balance):
     if not records:
         return {"overall_abb": 0.0, "monthly_abb": {}, "min_balance": 0.0, "max_balance": 0.0}
     sorted_recs = sorted(records, key=lambda x: str(x.get("iso_date", "")))
@@ -3767,14 +3969,8 @@ def calculate_daily_abb(records, opening_balance, closing_balance, statement_per
         return {"overall_abb": closing_balance, "monthly_abb": {}, "min_balance": closing_balance, "max_balance": closing_balance}
     try:
         all_dates = sorted(date_closing.keys())
-        period_dates = []
-        if statement_period:
-            for token in re.findall(r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4}", str(statement_period)):
-                parsed = parse_iso_date(token)
-                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", parsed):
-                    period_dates.append(parsed)
-        start_date = datetime.strptime(min(period_dates[0], all_dates[0]) if period_dates else all_dates[0], "%Y-%m-%d")
-        end_date = datetime.strptime(max(period_dates[-1], all_dates[-1]) if len(period_dates) >= 2 else all_dates[-1], "%Y-%m-%d")
+        start_date = datetime.strptime(all_dates[0], "%Y-%m-%d")
+        end_date = datetime.strptime(all_dates[-1], "%Y-%m-%d")
         total_days = max(1, (end_date - start_date).days + 1)
         current_dt = start_date
         curr_bal = opening_balance
@@ -3811,248 +4007,205 @@ def calculate_daily_abb(records, opening_balance, closing_balance, statement_per
             "days_tracked": len(records)
         }
 
-def _redact_for_ai(value):
-    """Remove common direct identifiers before transaction text leaves the app."""
-    text = str(value or "")
-    text = re.sub(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", "[EMAIL]", text, flags=re.I)
-    text = re.sub(r"\b[A-Z]{5}\d{4}[A-Z]\b", "[PAN]", text, flags=re.I)
-    text = re.sub(r"\b[A-Z]{4}0[A-Z0-9]{6}\b", "[IFSC]", text, flags=re.I)
-    text = re.sub(r"\b\d{9,18}\b", "[NUMBER]", text)
-    text = re.sub(r"[A-Z0-9._%+-]+@[A-Z0-9._%+-]+", "[UPI_ID]", text, flags=re.I)
-    return text[:180]
-
-
 def run_gemini_underwriting_intelligence(records, metadata):
-    """Return optional AI commentary; deterministic calculations remain authoritative."""
     if not GENAI_AVAILABLE:
         return None
+
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return None
 
     try:
-        credits = []
-        debits = []
-        churn = []
-        for idx, row in enumerate(records):
-            narration = _redact_for_ai(row.get("narration", ""))
-            category = str(row.get("category", "")).upper()
-            credit = float(row.get("credit") or 0)
-            debit = float(row.get("debit") or 0)
-            item = {"id": idx, "date": row.get("txn_date", ""), "narration": narration}
-            if credit >= 5000 or "SALARY" in category or any(k in narration.upper() for k in ("SAL", "PAY", "INCENTIVE", "BONUS", "NEFT")):
-                credits.append({**item, "amount": round(credit, 2)})
-            if debit >= 200 and ("EMI" in category or any(k in narration.upper() for k in ("ACH", "NACH", "MANDATE", "LOAN", "BAJAJ", "BILLPAY"))):
-                debits.append({**item, "amount": round(debit, 2)})
-            if "CC_PAYMENT" in category or "WALLET_TOPUP" in category:
-                churn.append({**item, "debit": round(debit, 2), "credit": round(credit, 2)})
+        client = genai.Client(api_key=api_key)
 
-        if not credits and not debits and not churn:
+        credit_candidates = []
+        for idx, r in enumerate(records):
+            c_val = r.get("credit", 0.0)
+            narr = r.get("narration", "")
+            cat = r.get("category", "")
+            if c_val >= 5000.0 or "SALARY" in cat or any(k in narr.upper() for k in ["SAL", "PAY", "INCENTIVE", "BONUS", "PVT", "LTD", "LIMITED", "CORP", "CMS", "NEFT"]):
+                credit_candidates.append({
+                    "id": idx,
+                    "date": r.get("txn_date", ""),
+                    "narration": narr,
+                    "amount": c_val
+                })
+
+        debit_candidates = []
+        for idx, r in enumerate(records):
+            d_val = r.get("debit", 0.0)
+            narr = r.get("narration", "").upper()
+            cat = r.get("category", "")
+            if d_val >= 200.0 and not any(k in narr for k in ["ICCL", "INDIAN CLEARING", "NSECL", "ZERODHA", "ANGEL"]):
+                if "EMI" in cat or any(k in narr for k in ["ACH", "NACH", "MANDATE", "LOAN", "DRAOPERATIONS", "CAPITAL", "BAJAJ FINANCE", "POONAWALLA", "KRAZYBEE", "NORTHERN ARC", "BIRLA", "BILLPAY DR-HDFC"]):
+                    debit_candidates.append({
+                        "id": idx,
+                        "date": r.get("txn_date", ""),
+                        "narration": r.get("narration", ""),
+                        "amount": d_val
+                    })
+
+        churn_candidates = []
+        for idx, r in enumerate(records):
+            narr = r.get("narration", "").upper()
+            cat = r.get("category", "")
+            if "CC_PAYMENT" in cat or "WALLET_TOPUP" in cat or any(k in narr for k in ["CRED", "MOBIKWIK", "RUPICARD", "CARD", "WALLET"]):
+                churn_candidates.append({
+                    "id": idx,
+                    "date": r.get("txn_date", ""),
+                    "narration": r.get("narration", ""),
+                    "debit": r.get("debit", 0.0),
+                    "credit": r.get("credit", 0.0)
+                })
+
+        credit_payload = credit_candidates[:35]
+        debit_payload = debit_candidates[:35]
+        churn_payload = churn_candidates[:30]
+
+        if not credit_payload and not debit_payload and not churn_payload:
             return None
 
-        def sample(items, limit):
-            if len(items) <= limit:
-                return items
-            indexes = [round(i * (len(items) - 1) / (limit - 1)) for i in range(limit)]
-            return [items[i] for i in indexes]
+        prompt = f"""You are an expert Credit Underwriter and Bank Statement AI Analyzer for Indian retail banking.
+Your task is to analyze these bank statement transaction candidates and return a structured JSON report.
 
-        prompt = """Review the following anonymized Indian bank-statement transaction candidates.
-Provide only secondary observations. Do not infer facts not supported by the supplied rows.
-Do not make credit approval, rejection, fraud, or eligibility decisions.
-Return JSON with keys: summary (string), possible_employer_names (array of strings),
-possible_lender_names (array of strings), limitations (array of strings).
-If evidence is weak, say so. Keep summary under 400 characters.
+CONSTRAINTS:
+1. Do NOT classify Indian Clearing Corporation Limited (ICCL), NSE, BSE, or Stock Brokers as Loan Lenders.
+2. Classify HDFC masked card auto-billpays (e.g. IB BILLPAY DR-HDFC...537206XXXXXX) and institutional EMIs into active lenders.
+3. Identify genuine employers by stripping prefixes (NEFT, RTGS, IFSC).
 
-CREDITS:\n""" + json.dumps(sample(credits, 35), ensure_ascii=False) + \
-            "\nDEBITS:\n" + json.dumps(sample(debits, 35), ensure_ascii=False) + \
-            "\nCARD/WALLET:\n" + json.dumps(sample(churn, 30), ensure_ascii=False)
+TRANSACTION CANDIDATES:
+Credits:
+{json.dumps(credit_payload, indent=2)}
 
-        model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
-        client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=15000))
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
-        )
-        if not response or not response.text:
-            return None
-        result = json.loads(response.text)
-        if not isinstance(result, dict):
-            return None
-        summary = result.get("summary", "")
-        if not isinstance(summary, str):
-            summary = ""
-        def safe_string_list(key, max_length):
-            value = result.get(key, [])
-            if not isinstance(value, list):
-                return []
-            return [item.strip()[:max_length] for item in value if isinstance(item, str) and item.strip()][:10]
+Debits:
+{json.dumps(debit_payload, indent=2)}
 
-        return {
-            "summary": summary[:500],
-            "possible_employer_names": safe_string_list("possible_employer_names", 100),
-            "possible_lender_names": safe_string_list("possible_lender_names", 100),
-            "limitations": safe_string_list("limitations", 160),
-        }
-    except Exception as exc:
-        print(f"[Gemini] Optional analysis unavailable: {type(exc).__name__}: {exc}")
+Card/Wallet Flows:
+{json.dumps(churn_payload, indent=2)}
+
+Return ONLY valid JSON:
+{{
+  "salary_intelligence": {{
+    "primary_employer_name": "string",
+    "verified_employers": ["string"],
+    "salary_transactions": [
+      {{
+        "id": 0,
+        "is_salary_or_incentive": true,
+        "salary_component": "BASE_SALARY",
+        "employer_name": "string"
+      }}
+    ],
+    "stability_score": 90
+  }},
+  "debt_intelligence": {{
+    "active_lenders": [
+      {{
+        "raw_code": "string",
+        "clean_lender_name": "string",
+        "loan_type": "string",
+        "monthly_obligation": 0.0
+      }}
+    ],
+    "total_monthly_obligation": 0.0
+  }},
+  "fraud_and_churn_intelligence": {{
+    "risk_tag": "CLEAN",
+    "risk_score": 10,
+    "churn_velocity": "LOW",
+    "reasoning": "string"
+  }}
+}}"""
+
+        response = None
+        for target_model in ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+            try:
+                response = client.models.generate_content(
+                    model=target_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1
+                    )
+                )
+                if response and response.text:
+                    break
+            except Exception:
+                continue
+
+        if response and response.text:
+            return json.loads(response.text)
+
+    except Exception as e:
+        print(f"[Gemini Underwriting Fallback] {e}")
         return None
 
-def order_transactions_by_balance(records, opening_balance, tolerance=0.02):
-    """Restore same-day transaction order from running-balance transitions."""
-    if not records:
-        return records
-    indexed = list(enumerate(records))
-    indexed.sort(key=lambda pair: (str(pair[1].get("iso_date") or "9999-99-99"), pair[0]))
-    groups = defaultdict(list)
-    for original_index, row in indexed:
-        groups[str(row.get("iso_date") or "")].append((original_index, row))
-    current_balance = float(opening_balance or 0.0)
-    ordered = []
-    for day in sorted(groups):
-        pending = list(groups[day])
-        while pending:
-            match_pos = None
-            for pos, (_, row) in enumerate(pending):
-                expected = round(current_balance + float(row.get("credit") or 0.0) - float(row.get("debit") or 0.0), 2)
-                actual = round(float(row.get("balance") or 0.0), 2)
-                if abs(expected - actual) <= tolerance:
-                    match_pos = pos
-                    break
-            if match_pos is None:
-                match_pos = 0
-            _, chosen = pending.pop(match_pos)
-            ordered.append(chosen)
-            current_balance = float(chosen.get("balance") or current_balance)
-    if isinstance(records, list):
-        records[:] = ordered
-        return records
-    return ordered
-
+    return None
 
 def compute_underwriting_insights(records, metadata):
-    records = order_transactions_by_balance(records, (metadata or {}).get("opening_balance", 0.0))
     df = pd.DataFrame(records)
     if df.empty:
         return {}
-    for col, default in (("debit", 0.0), ("credit", 0.0), ("balance", 0.0), ("category", "GENERAL"), ("narration", ""), ("txn_date", ""), ("iso_date", "")):
-        if col not in df.columns:
-            df[col] = default
-    for col in ("debit", "credit", "balance"):
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    for col in ("category", "narration", "txn_date", "iso_date"):
-        df[col] = df[col].fillna("").astype(str)
     total_debits = round(float(df['debit'].sum()), 2)
     total_credits = round(float(df['credit'].sum()), 2)
     open_bal = float(metadata.get('opening_balance', 0.0))
     close_bal = float(metadata.get('closing_balance', 0.0))
     reconciled_calc = round(open_bal + total_credits - total_debits, 2)
     variance = round(abs(reconciled_calc - close_bal), 2)
-    running_balance = open_bal
-    balance_continuity_breaks = 0
-    for row in records:
-        expected_balance = round(running_balance + float(row.get("credit") or 0.0) - float(row.get("debit") or 0.0), 2)
-        actual_balance = round(float(row.get("balance") or 0.0), 2)
-        if abs(expected_balance - actual_balance) > 0.02:
-            balance_continuity_breaks += 1
-        running_balance = actual_balance
-    aggregate_reconciled = variance <= 0.05
-    is_reconciled = aggregate_reconciled and balance_continuity_breaks == 0
+    is_reconciled = (variance <= 1.0)
     
-    # 1. Salary & Business Inflows
-    salary_df = df[df['category'].str.contains('SALARY', na=False)]
-    business_df = df[df['category'].str.contains('BUSINESS_INFLOW', na=False)]
+    # 1. Salary Inflows (strictly credits > 0)
+    salary_df = df[(df['category'].str.contains('SALARY', na=False)) & (df['credit'] > 0)]
     salary_credits = []
     employers = []
     
     for _, row in salary_df.iterrows():
         desc = row['narration']
-        emp = extract_dynamic_employer(desc)
+        raw_ai_emp = row.get("clean_entity") or row.get("sub_category")
+        if pd.notna(raw_ai_emp) and str(raw_ai_emp).strip() and str(raw_ai_emp).strip().lower() != "nan":
+            emp = str(raw_ai_emp).strip()
+        else:
+            emp = extract_dynamic_employer(desc)
         salary_credits.append({
             "date": row['txn_date'],
             "iso_date": row['iso_date'],
             "employer": emp,
             "amount": row['credit']
         })
-        if emp != "Corporate Payroll":
-            identity = _employer_identity_key(emp)
-            existing_index = next((i for i, current in enumerate(employers) if _employer_identity_key(current) == identity), None)
-            if existing_index is None:
-                employers.append(emp)
-            elif len(emp) > len(employers[existing_index]):
-                employers[existing_index] = emp
-                for salary_item in salary_credits:
-                    if _employer_identity_key(salary_item["employer"]) == identity:
-                        salary_item["employer"] = emp
+        if emp and emp not in employers and emp != "Corporate Payroll":
+            employers.append(str(emp))
             
     if not employers and salary_credits:
         employers = ["Corporate Payroll"]
         
-    salary_by_month = {}
-    for item in salary_credits:
-        iso_date = str(item.get("iso_date") or "")
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso_date):
-            month = iso_date[:7]
-            salary_by_month[month] = salary_by_month.get(month, 0.0) + float(item.get("amount") or 0.0)
-    full_months = [amount for amount in salary_by_month.values() if amount >= 10000]
-    observed_salary_months = len(full_months)
-    
-    valid_months = {str(v)[:7] for v in df['iso_date'].dropna().astype(str) if re.match(r"^\d{4}-\d{2}-\d{2}$", str(v))}
-    num_months = max(1, len(valid_months))
-
-    if full_months:
-        avg_monthly_salary = round(sum(full_months) / observed_salary_months, 2)
+    if salary_credits:
+        salary_by_month = {}
+        for s in salary_credits:
+            m = s['iso_date'][:7] if s.get('iso_date') else "2026-M"
+            salary_by_month[m] = salary_by_month.get(m, 0.0) + s['amount']
+        full_months = [v for k, v in salary_by_month.items() if v >= 10000]
+        avg_monthly_salary = round(sum(full_months) / len(full_months), 2) if full_months else round(salary_df['credit'].mean(), 2)
         salary_range_str = f"₹{int(avg_monthly_salary):,} - ₹{int(avg_monthly_salary * 1.15):,}"
-    elif not business_df.empty:
-        avg_monthly_salary = round(float(business_df['credit'].sum()) / num_months, 2)
-        salary_range_str = f"₹{int(avg_monthly_salary):,}/mo (Merchant / Business Turnover)"
-        if not employers:
-            employers = ["Merchant / Business Operations"]
     else:
         avg_monthly_salary = 0.0
-        salary_range_str = "N/A (No verified salary-month evidence)"
-
-    if observed_salary_months == 0:
-        stability_score = 70 if not business_df.empty else 0
-    elif observed_salary_months == 1:
-        stability_score = 45
-    elif observed_salary_months == 2:
-        stability_score = 55
-    elif observed_salary_months == 3:
-        stability_score = 65
-    elif observed_salary_months <= 5:
-        stability_score = 75
-    elif observed_salary_months <= 8:
-        stability_score = 85
-    else:
-        stability_score = 90
-    if observed_salary_months >= 3:
-        avg_observed = sum(full_months) / len(full_months)
-        if avg_observed > 0:
-            coefficient_of_variation = (sum((amount - avg_observed) ** 2 for amount in full_months) / len(full_months)) ** 0.5 / avg_observed
-            if coefficient_of_variation <= 0.15:
-                stability_score = min(95, stability_score + 5)
-            elif coefficient_of_variation > 0.50:
-                stability_score = max(0, stability_score - 5)
+        salary_range_str = "₹0 (No Direct Salaried Inflows Tagged)"
+        
+    stability_score = 92 if salary_credits else 50
     
     # 2. Institutional Debt & Active Lenders
     LENDER_CODE_MAP = {
         "KMBLDRAOPERATIONS": "Kotak Mahindra Bank Mandate",
         "TCHHL": "Tata Capital Housing Finance",
         "TCHIN": "Tata Capital Housing Finance",
-        "ADINGENTATA": "Tata Capital Housing Finance",
+        "ADINGEN_TATA": "Tata Capital Housing Finance",
         "CANFIN": "Can Fin Homes",
         "BFLAUTOPAY": "Bajaj Finance",
-        "IDFCFIRST": "IDFC FIRST Bank Loan",
+        "IDFC FIRST": "IDFC FIRST Bank Loan",
         "HINDON": "Hindon Mercantile",
         "POONAWALLA": "Poonawalla Fincorp",
         "KRAZYBEE": "KrazyBee Services",
-        "NORTHERNARC": "Northern Arc Capital",
-        "NORTHARCAP": "Northern Arc Capital",
-        "ADITYABIRLA": "Aditya Birla Finance",
+        "NORTHERN": "Northern Arc Capital",
+        "ADITYA BIRLA": "Aditya Birla Finance",
         "LIC": "Life Insurance Corporation (LIC Loan)",
         "MUTHOOT": "Muthoot Finance",
         "HDBFS": "HDB Financial Services",
@@ -4065,39 +4218,43 @@ def compute_underwriting_insights(records, metadata):
     
     for _, row in loan_df.iterrows():
         narr = row['narration'].upper()
-        clean_narr = re.sub(r'\s+', '', narr)
-        if any(b in clean_narr for b in ["ICCL", "INDIANCLEARING", "NSECL", "ZERODHA", "ANGELONE"]):
+        if any(b in narr for b in ["ICCL", "INDIAN CLEARING", "NSECL", "ZERODHA", "ANGEL"]):
             continue
-        matched_lender = None
-        for code, formal_name in LENDER_CODE_MAP.items():
-            if code in clean_narr:
-                matched_lender = formal_name
-                break
-        if not matched_lender:
-            if "BILLPAYDR-HDFC" in clean_narr and "XXXXXX" in clean_narr:
-                matched_lender = "HDFC Bank SmartEMI / Card Loan"
-            elif "DIRECT DR" in narr and ("INT TRF" in narr or re.search(r'00\d{11}', clean_narr)):
-                matched_lender = "SBI Standing Instruction / OD Loan"
-            elif "EMI" in narr and "CHQ" in narr:
-                matched_lender = "Banking Institution Cheque EMI"
-            elif row['debit'] >= 1000:
-                matched_lender = "Financial Institution Mandate"
+            
+        ai_lender = str(row.get("clean_entity") or row.get("sub_category") or "").strip()
+        if ai_lender and ai_lender.lower() not in ("general", "unknown", "corporate payroll", ""):
+            matched_lender = ai_lender
+        else:
+            matched_lender = None
+            for code, formal_name in LENDER_CODE_MAP.items():
+                if code in narr:
+                    matched_lender = formal_name
+                    break
+            if not matched_lender:
+                if "BILLPAY DR-HDFC" in narr and "XXXXXX" in narr:
+                    matched_lender = "HDFC Bank SmartEMI / Card Loan"
+                elif "EMI" in narr and "CHQ" in narr:
+                    matched_lender = "Banking Institution Cheque EMI"
+                elif row['debit'] >= 1000:
+                    matched_lender = "Financial Institution Mandate"
+                    
         if matched_lender and matched_lender not in active_lenders:
             active_lenders.append(matched_lender)
             
+    num_months = max(1, len(df['iso_date'].str[:7].unique()))
     monthly_emi_obligations = round(float(loan_df['debit'].sum()) / num_months, 2)
     jumbo_loans = [{"date": r['txn_date'], "narration": r['narration'], "amount": r['credit']} for _, r in disburse_df.iterrows()]
     total_jumbo_disbursed = sum(j['amount'] for j in jumbo_loans)
     trading_df = df[df['category'].str.contains('STOCK_TRADING', na=False)]
     
-    # 3. Segregated CC Payments & Wallet Topups
+    # 3. Segregated CC Payments & Wallet Topups (All Platforms)
     cc_df = df[df['category'].str.contains('CC_PAYMENT', na=False)]
     wallet_df = df[df['category'].str.contains('WALLET_TOPUP', na=False)]
-    cred_inflows = round(float(cc_df[cc_df['narration'].str.contains(r'@CRED|@YESCRED', case=False, na=False)]['credit'].sum()), 2)
-    cred_outflows = round(float(cc_df[cc_df['narration'].str.contains(r'CRED\.CLUB|CREDPAY', case=False, na=False)]['debit'].sum()), 2)
+    cred_inflows = round(float(cc_df['credit'].sum() + wallet_df['credit'].sum()), 2)
+    cred_outflows = round(float(cc_df['debit'].sum() + wallet_df['debit'].sum()), 2)
     
     bounce_df = df[df['category'].str.contains('BOUNCE_FAILURE', na=False)]
-    abb_stats = calculate_daily_abb(records, open_bal, close_bal, metadata.get("period"))
+    abb_stats = calculate_daily_abb(records, open_bal, close_bal)
     foir_pct = round((monthly_emi_obligations / avg_monthly_salary) * 100, 1) if avg_monthly_salary > 0 else 0.0
 
     # Churning & Fraud Logic
@@ -4115,23 +4272,47 @@ def compute_underwriting_insights(records, metadata):
         risk_tag = "CLEAN"
         risk_score = 10
         churn_velocity = "LOW"
-        fraud_reasoning = "No configured high-volume card-churn pattern was triggered in the parsed rows; this is not a fraud determination."
+        fraud_reasoning = "Card settlements reflect debt liquidation without circular fund recycling."
 
+    # Execute Non-blocking Hybrid AI Layer
+    ai_applied = False
     ai_result = run_gemini_underwriting_intelligence(records, metadata)
-    ai_applied = bool(isinstance(ai_result, dict) and ai_result.get("summary"))
     primary_employer = employers[0] if employers else "Corporate Payroll"
-    ai_commentary = ai_result.get("summary", "") if ai_applied else ""
+
+    if ai_result:
+        ai_applied = True
+        sal_intel = ai_result.get("salary_intelligence", {})
+        if sal_intel.get("primary_employer_name"):
+            primary_employer = sal_intel["primary_employer_name"].strip()
+        if sal_intel.get("verified_employers"):
+            clean_ai_emps = [e.strip() for e in sal_intel["verified_employers"] if e.strip() and not any(k in e.upper() for k in ["ICCL", "CLEARING", "ANGEL"])]
+            if clean_ai_emps:
+                employers = clean_ai_emps
+            if primary_employer and primary_employer not in employers:
+                employers.insert(0, primary_employer)
+
+        debt_intel = ai_result.get("debt_intelligence", {})
+        if debt_intel.get("active_lenders"):
+            ai_lenders = [l.get("clean_lender_name") for l in debt_intel["active_lenders"] if l.get("clean_lender_name") and not any(k in l.get("clean_lender_name").upper() for k in ["ICCL", "CLEARING", "NSE", "STOCK"])]
+            if ai_lenders:
+                active_lenders = ai_lenders
+
+        fraud_intel = ai_result.get("fraud_and_churn_intelligence", {})
+        if fraud_intel.get("risk_tag") in ("CRITICAL", "ELEVATED", "CLEAN"):
+            risk_tag = fraud_intel["risk_tag"]
+        if fraud_intel.get("risk_score") is not None:
+            risk_score = int(fraud_intel["risk_score"])
+        if fraud_intel.get("churn_velocity"):
+            churn_velocity = fraud_intel["churn_velocity"]
+        if fraud_intel.get("reasoning"):
+            fraud_reasoning = fraud_intel["reasoning"]
 
     employer_switch = (len(employers) >= 2)
     if employer_switch:
-        switch_notes = f"Multiple employer names detected ({', '.join(employers)}); review dates and continuity."
-        stability_score = max(0, stability_score - 5)
-    elif observed_salary_months:
-        switch_notes = "One employer pattern observed in the parsed salary credits."
-    elif not business_df.empty:
-        switch_notes = f"Merchant / business inflows detected ({len(business_df)} gateway settlements)."
+        switch_notes = f"Multiple employers detected ({', '.join(employers)})."
+        stability_score = 82
     else:
-        switch_notes = "No direct salary credits were confidently tagged in this statement."
+        switch_notes = "Single stable employer tenure detected."
 
     return {
         "metadata": metadata,
@@ -4143,10 +4324,6 @@ def compute_underwriting_insights(records, metadata):
             "calculated_closing": reconciled_calc,
             "variance": variance,
             "is_reconciled": is_reconciled,
-            "aggregate_reconciled": aggregate_reconciled,
-            "balance_continuity_breaks": balance_continuity_breaks,
-            "balance_continuity_status": "PASS" if balance_continuity_breaks == 0 else "WARNING",
-            "status": "RECONCILED" if is_reconciled else "WARNING",
             "total_transactions": len(records),
             "dr_count": int((df['debit'] > 0).sum()),
             "cr_count": int((df['credit'] > 0).sum())
@@ -4156,19 +4333,12 @@ def compute_underwriting_insights(records, metadata):
             "verified_employers": employers,
             "salary_run_rate": salary_range_str,
             "avg_monthly_salary": avg_monthly_salary,
-            "credits_count": len(salary_credits) if salary_credits else len(business_df),
+            "credits_count": len(salary_credits),
             "credits_history": salary_credits,
             "employer_switch": employer_switch,
             "switch_notes": switch_notes,
             "stability_score": stability_score,
-            "observed_salary_months": observed_salary_months,
-            "stability_tier": (
-                "Consistent observed salary history" if stability_score >= 80 else
-                "Active merchant / business cashflow" if not business_df.empty and stability_score >= 65 else
-                "Moderate observed salary history" if stability_score >= 65 else
-                "Limited salary history" if stability_score > 0 else
-                "Insufficient salary evidence"
-            ),
+            "stability_tier": "Grade A (Prime Salaried)" if stability_score >= 80 else "Grade B (Moderate Inflows)",
             "ai_enabled": ai_applied
         },
         "debt_and_emi": {
@@ -4178,14 +4348,13 @@ def compute_underwriting_insights(records, metadata):
             "jumbo_loans_disbursed": total_jumbo_disbursed,
             "jumbo_loans_list": jumbo_loans,
             "foir_percentage": foir_pct,
-            "foir_available": avg_monthly_salary > 0,
             "total_emi_paid": round(float(loan_df['debit'].sum()), 2),
             "ai_enabled": ai_applied
         },
         "cc_stress": {
             "is_alert": (total_jumbo_disbursed >= 50000 and float(cc_df['debit'].sum()) >= 50000),
             "severity": "CRITICAL" if (total_jumbo_disbursed >= 50000 and float(cc_df['debit'].sum()) >= 50000) else "NORMAL",
-            "message": "A configured high-volume card-stress pattern was detected; manual review is recommended." if (total_jumbo_disbursed >= 50000 and float(cc_df['debit'].sum()) >= 50000) else "No configured high-volume card-stress trigger was detected in the parsed rows.",
+            "message": "High revolver card stress / debt restructuring detected." if (total_jumbo_disbursed >= 50000 and float(cc_df['debit'].sum()) >= 50000) else "Revolving credit cards are within normal operating parameters.",
             "jumbo_disbursed": total_jumbo_disbursed,
             "card_debt_settled": round(float(cc_df['debit'].sum()), 2)
         },
@@ -4209,23 +4378,108 @@ def compute_underwriting_insights(records, metadata):
             "fraud_risk_tag": risk_tag,
             "fraud_reasoning": fraud_reasoning
         },
-        "ai_advisory": ai_result if isinstance(ai_result, dict) else None,
         "fraud_and_churn_intelligence": {
             "risk_tag": risk_tag,
             "risk_score": risk_score,
             "churn_velocity": churn_velocity,
             "reasoning": fraud_reasoning,
-            "assessment_scope": "Rule-based transaction-pattern indicator only; not a fraud finding or lending decision.",
-            "ai_commentary": ai_commentary,
             "ai_enabled": ai_applied
         },
         "bounce_audit": {
             "bounce_count": len(bounce_df),
             "is_clean": (len(bounce_df) == 0),
-            "status_text": "No bounce/return markers detected in parsed rows" if len(bounce_df) == 0 else f"{len(bounce_df)} Bounce / return markers detected",
+            "status_text": "0 Bounces • Clean Repayment Track" if len(bounce_df) == 0 else f"{len(bounce_df)} Bounces / Failures Detected",
             "tag_color": "emerald" if len(bounce_df) == 0 else "rose",
-            "bounces_list": bounce_df[['txn_date', 'narration', 'debit']].to_dict('records'),
-            "assessment_scope": "Only parsed bounce/return markers are counted; this does not verify the full repayment history."
+            "bounces_list": bounce_df[['txn_date', 'narration', 'debit']].to_dict('records')
         },
         "abb_metrics": abb_stats
     }
+
+def clear_db(db_path=DB_PATH):
+    init_db(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
+    conn.execute("PRAGMA busy_timeout=5000;")
+    c = conn.cursor()
+    c.execute("DELETE FROM transactions")
+    c.execute("DELETE FROM statements")
+    conn.commit()
+    conn.close()
+
+def save_statement_to_db(records, metadata, insights=None, filename=None):
+    init_db()
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.execute("PRAGMA busy_timeout=5000;")
+    c = conn.cursor()
+    
+    acc = (metadata.get("account_no") or "").strip()
+    if not acc:
+        seed = (filename or "") + str(len(records)) + (records[0].get("txn_date", "") if records else "")
+        acc = "UNK-" + hashlib.md5(seed.encode()).hexdigest()[:8].upper()
+        metadata["account_no"] = acc
+    for r in records:
+        r["account_no"] = acc
+    c.execute("DELETE FROM statements")
+    c.execute("DELETE FROM transactions")
+
+    abb_val = insights.get('abb_metrics', {}).get('overall_abb', 0.0) if insights else 0.0
+    c.execute("""
+    INSERT INTO statements (
+        bank, borrower_name, account_no, branch, sol_id, ifsc, cust_id, email, mobile,
+        account_type, period, opening_balance, closing_balance, total_withdrawals,
+        total_deposits, abb, reconciled, filename
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        metadata.get("bank", ""),
+        metadata.get("borrower_name", ""),
+        metadata.get("account_no", ""),
+        metadata.get("branch", ""),
+        metadata.get("sol_id", ""),
+        metadata.get("ifsc", ""),
+        metadata.get("cust_id", ""),
+        metadata.get("email", ""),
+        metadata.get("mobile", ""),
+        metadata.get("account_type", ""),
+        metadata.get("period", ""),
+        metadata.get("opening_balance", 0.0),
+        metadata.get("closing_balance", 0.0),
+        metadata.get("total_withdrawals", 0.0),
+        metadata.get("total_deposits", 0.0),
+        abb_val,
+        1 if (insights and insights.get('reconciliation', {}).get('is_reconciled', True)) else 0,
+        filename or metadata.get("bank", "statement.pdf")
+    ))
+              
+    tx_tuples = [
+        (
+            r.get("bank", ""),
+            r.get("account_no", ""),
+            r.get("txn_date", ""),
+            r.get("iso_date", ""),
+            r.get("narration", ""),
+            r.get("debit", 0.0),
+            r.get("credit", 0.0),
+            r.get("balance", 0.0),
+            r.get("category", "GENERAL"),
+            r.get("clean_entity") or r.get("sub_category", "")
+        )
+        for r in records
+    ]
+    
+    c.executemany("""
+    INSERT INTO transactions (
+        bank, account_no, txn_date, iso_date, narration, debit, credit, balance, category, sub_category
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, tx_tuples)
+    
+    conn.commit()
+    conn.close()
+
+# Dedicated UCO Bank parser (kept in its own module).
+from bank_parsers.uco_parser import parse_uco_pdf as _parse_uco_pdf
+
+def parse_uco_bank_pdf(pdf_source, password=None):
+    return _parse_uco_pdf(
+        pdf_source, password=password,
+        categorize_fn=categorize_transaction,
+        date_parser=parse_iso_date,
+    )

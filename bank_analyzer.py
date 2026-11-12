@@ -23,6 +23,7 @@ from analyzer_engine import (
     parse_standard_chartered_pdf,
     parse_universal_pdf,
     tag_recurring_salary,
+    auto_categorize_with_ai,
     compute_underwriting_insights,
 )
 
@@ -54,7 +55,8 @@ def parse_any(path, password=None):
 
     if not recs:
         recs, meta = parse_universal_pdf(content, password=password, detected_bank=bank)
-    return tag_recurring_salary(recs), meta
+    recs = tag_recurring_salary(recs)
+    return auto_categorize_with_ai(recs), meta
 
 
 def main():

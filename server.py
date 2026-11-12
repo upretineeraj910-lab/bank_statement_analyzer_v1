@@ -1,367 +1,626 @@
-"""FinTech Bank Statement Analyzer API.
-
-The application intentionally keeps only the latest analysed statement in RAM.
-No customer statement or transaction is written to a persistent database.
 """
-from __future__ import annotations
+FinTech Bank Statement Analyzer & Underwriting Dashboard Server
+FastAPI Web Application backend.
+"""
 
 import os
-import re
 import json
+import sqlite3
 import traceback
-import secrets
-import time
-from threading import RLock
-from typing import Optional
-
+from contextlib import asynccontextmanager
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, Response
+from typing import Optional
+from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.concurrency import run_in_threadpool
 
 from analyzer_engine import (
-    detect_bank_format, diagnose_pdf,
-    parse_federal_pdf, parse_hdfc_pdf, parse_axis_pdf, parse_idfc_pdf,
-    parse_sbi_pdf, parse_icici_pdf, parse_standard_chartered_pdf,
-    parse_universal_pdf, compute_underwriting_insights, tag_recurring_salary,
+    DB_PATH,
+    init_db,
+    clear_db,
+    detect_bank_format,
+    diagnose_pdf,
+    parse_federal_pdf,
+    parse_uco_bank_pdf,
+    parse_hdfc_pdf,
+    parse_axis_pdf,
+    parse_idfc_pdf,
+    parse_sbi_pdf,
+    parse_icici_pdf,
+    parse_standard_chartered_pdf,
+    parse_universal_pdf,
+    compute_underwriting_insights,
+    save_statement_to_db,
+    tag_recurring_salary,
+    auto_categorize_with_ai,
+    clean_amount
 )
 from export_service import create_excel_report, create_los_json
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_env_path = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_env_path):
+    try:
+        with open(_env_path, "r", encoding="utf-8") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    _k = _k.strip()
+                    _v = _v.strip().strip('"').strip("'")
+                    if _k and _v and _k not in os.environ:
+                        os.environ[_k] = _v
+    except Exception:
+        pass
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+app = FastAPI(title="FinTech Bank Statement Analyzer & Underwriting Suite", version="3.2", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+BASE_DIR = os.path.dirname(__file__)
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
-# Browser-session-isolated RAM storage. Nothing is written to a persistent DB.
-# Each browser gets an opaque HttpOnly cookie; one visitor cannot read another
-# visitor's latest statement by calling the dashboard/export endpoints.
-_STATE_LOCK = RLock()
-_SESSIONS = {}
-_SESSION_TTL_SECONDS = 4 * 60 * 60
-_MAX_SESSIONS = 500
-_EMPTY_STATE = {"metadata": None, "records": [], "insights": None, "filename": None}
-
-
-def _session_id(request: Request, response: Response) -> str:
-    now = time.time()
-    sid = request.cookies.get("statement_session")
-    with _STATE_LOCK:
-        # Expire inactive browser sessions and cap memory use.
-        expired = [key for key, value in _SESSIONS.items() if now - value["last_seen"] > _SESSION_TTL_SECONDS]
-        for key in expired:
-            _SESSIONS.pop(key, None)
-        if not sid or sid not in _SESSIONS:
-            sid = secrets.token_urlsafe(32)
-            _SESSIONS[sid] = {"state": dict(_EMPTY_STATE), "last_seen": now}
-            response.set_cookie(
-                key="statement_session", value=sid, max_age=_SESSION_TTL_SECONDS,
-                httponly=True, secure=(request.url.scheme == "https"),
-                samesite="lax", path="/",
-            )
-        else:
-            _SESSIONS[sid]["last_seen"] = now
-        if len(_SESSIONS) > _MAX_SESSIONS:
-            oldest = sorted(_SESSIONS, key=lambda key: _SESSIONS[key]["last_seen"])
-            for key in oldest[:len(_SESSIONS) - _MAX_SESSIONS]:
-                _SESSIONS.pop(key, None)
-        return sid
-
-
-def _store_statement(sid: str, metadata, records, insights, filename):
-    with _STATE_LOCK:
-        if sid not in _SESSIONS:
-            _SESSIONS[sid] = {"state": dict(_EMPTY_STATE), "last_seen": time.time()}
-        _SESSIONS[sid]["state"] = {
-            "metadata": metadata, "records": records,
-            "insights": insights, "filename": filename,
-        }
-        _SESSIONS[sid]["last_seen"] = time.time()
-
-
-def _clear_statement(sid: str):
-    with _STATE_LOCK:
-        if sid in _SESSIONS:
-            _SESSIONS[sid]["state"] = dict(_EMPTY_STATE)
-            _SESSIONS[sid]["last_seen"] = time.time()
-
-app = FastAPI(title="FinTech Bank Statement Analyzer & Underwriting Suite", version="4.1.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
-)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-
-
-def _parse_statement(content: bytes, password: Optional[str], filename: str):
-    detection = detect_bank_format(file_bytes=content, password=password)
-    if detection.get("is_encrypted"):
-        if detection.get("auth_failed"):
-            raise ValueError("Incorrect PDF password. Please try again.")
-        raise PermissionError("This PDF is password protected. Enter its password to continue.")
-
-    bank = detection.get("detected_bank", "Generic")
-    if "Federal" in bank:
-        records, metadata = parse_federal_pdf(content, password=password)
-    elif "SBI" in bank or "STATE BANK" in bank:
-        records, metadata = parse_sbi_pdf(content, password=password)
-    elif "Axis" in bank:
-        records, metadata = parse_axis_pdf(content, password=password)
-    elif "HDFC" in bank:
-        records, metadata = parse_hdfc_pdf(content, password=password)
-    elif "IDFC" in bank:
-        records, metadata = parse_idfc_pdf(content, password=password)
-    elif "ICICI" in bank:
-        records, metadata = parse_icici_pdf(content, password=password)
-    elif "Standard Chartered" in bank:
-        records, metadata = parse_standard_chartered_pdf(content, password=password)
-    else:
-        records, metadata = parse_universal_pdf(content, password=password, detected_bank=bank)
-
-    if not records:
-        fallback_records, fallback_meta = parse_universal_pdf(content, password=password, detected_bank=bank)
-        if len(fallback_records) > len(records):
-            records, metadata = fallback_records, fallback_meta
-
-    if not records:
-        diag = diagnose_pdf(content, password=password)
-        reason = "No transactions could be extracted."
-        if diag.get("looks_scanned"):
-            reason += " This appears to be a scanned PDF; OCR is not enabled in this build."
-        raise ValueError(f"{reason} Bank detected: {bank}; pages: {diag.get('pages', 'unknown')}.")
-
-    metadata = dict(metadata or {})
-    metadata["bank"] = metadata.get("bank") or bank
-    records = tag_recurring_salary(records)
-    for row in records:
-        row["bank"] = metadata["bank"]
-        row["account_no"] = metadata.get("account_no", "")
-    insights = compute_underwriting_insights(records, metadata)
-    return detection, records, metadata, insights
-
-
-def _snapshot(sid: str):
-    with _STATE_LOCK:
-        session = _SESSIONS.get(sid)
-        if not session:
-            return None
-        state = session["state"]
-        if not state["metadata"] or not state["records"]:
-            return None
-        return (
-            dict(state["metadata"]),
-            [dict(row) for row in state["records"]],
-            json.loads(json.dumps(state["insights"] or {})),
-            state["filename"],
-        )
-
-
-def _empty_dashboard():
-    return {
-        "is_empty": True, "selected_bank": "All", "available_statements": [],
-        "insights": {},
-        "tab_counts": {"all": 0, "salary": 0, "loans": 0, "trading": 0, "churn": 0, "bounce": 0},
-        "chart_cashflow": {"labels": [], "inflows": [], "outflows": [], "net": []},
-        "chart_categories": {"labels": [], "values": [], "counts": {}},
-        "chart_balance": [], "total_transactions": 0,
-    }
-
-
-@app.get("/api/health")
-def health(request: Request, response: Response):
-    sid = _session_id(request, response)
-    snap = _snapshot(sid)
-    return {"status": "ok", "has_statement": bool(snap), "storage": "in-memory"}
-
+def get_db_conn():
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    return conn
 
 @app.get("/api/statements")
-def get_statements(request: Request, response: Response):
-    sid = _session_id(request, response)
-    snap = _snapshot(sid)
-    if not snap:
-        return {"statements": []}
-    meta, _, insights, filename = snap
-    return {"statements": [{
-        "bank": meta.get("bank"), "borrower_name": meta.get("borrower_name"),
-        "account_no": meta.get("account_no"), "closing_balance": meta.get("closing_balance", 0),
-        "abb": insights.get("abb_metrics", {}).get("overall_abb", 0), "filename": filename,
-    }]}
-
+def get_statements():
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM statements ORDER BY id ASC")
+    stmts = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return {"statements": stmts}
 
 @app.get("/api/dashboard")
-def get_dashboard(request: Request, response: Response, bank: Optional[str] = None):
-    sid = _session_id(request, response)
-    snap = _snapshot(sid)
-    if not snap:
-        return _empty_dashboard()
-    metadata, records, insights, filename = snap
-    if bank and bank.lower() != "all" and bank not in (metadata.get("bank"), metadata.get("account_no")):
-        return _empty_dashboard()
-
-    df = pd.DataFrame(records)
-    if df.empty:
-        return _empty_dashboard()
-    df["credit"] = pd.to_numeric(df.get("credit", 0), errors="coerce").fillna(0.0)
-    df["debit"] = pd.to_numeric(df.get("debit", 0), errors="coerce").fillna(0.0)
-    df["month"] = df["iso_date"].astype(str).str[:7]
-    monthly = df[df["month"].str.len() == 7].groupby("month")[["credit", "debit"]].sum().reset_index().sort_values("month")
-    monthly["net"] = monthly["credit"] - monthly["debit"]
-    cat_summary = df.groupby("category")[["debit", "credit"]].sum().reset_index()
-    df_sorted = df.sort_values(["iso_date"])
-    df_sorted = df_sorted.drop_duplicates(subset=["iso_date", "txn_date", "balance"], keep="last")
+def get_dashboard(bank: Optional[str] = None):
+    conn = get_db_conn()
+    c = conn.cursor()
+    
+    if bank and str(bank).lower() != 'all':
+        c.execute("SELECT * FROM statements WHERE bank = ? OR account_no = ?", (bank, bank))
+    else:
+        c.execute("SELECT * FROM statements ORDER BY id ASC")
+    stmts = [dict(r) for r in c.fetchall()]
+    
+    c.execute("SELECT bank, borrower_name, account_no, abb, closing_balance FROM statements")
+    all_stmts = [dict(r) for r in c.fetchall()]
+    
+    if bank and str(bank).lower() != 'all':
+        c.execute("SELECT * FROM transactions WHERE bank = ? OR account_no = ? ORDER BY iso_date DESC, id DESC", (bank, bank))
+    else:
+        c.execute("SELECT * FROM transactions ORDER BY iso_date DESC, id DESC")
+    txns = [dict(r) for r in c.fetchall()]
+    conn.close()
+    
+    if not txns:
+        return {
+            "is_empty": True,
+            "selected_bank": bank or "All",
+            "available_statements": [],
+            "insights": {
+                "metadata": {
+                    "bank": "No Statement Uploaded",
+                    "borrower_name": "—",
+                    "account_no": "—",
+                    "branch": "—",
+                    "sol_id": "—",
+                    "ifsc": "—",
+                    "cust_id": "—",
+                    "email": "—",
+                    "mobile": "—",
+                    "account_type": "—",
+                    "period": "—",
+                    "opening_balance": 0.0,
+                    "closing_balance": 0.0,
+                    "total_withdrawals": 0.0,
+                    "total_deposits": 0.0
+                },
+                "reconciliation": {
+                    "opening_balance": 0.0,
+                    "total_deposits": 0.0,
+                    "total_withdrawals": 0.0,
+                    "closing_balance": 0.0,
+                    "calculated_closing": 0.0,
+                    "variance": 0.0,
+                    "is_reconciled": True,
+                    "total_transactions": 0,
+                    "dr_count": 0,
+                    "cr_count": 0
+                },
+                "salary_audit": {
+                    "verified_employers": [],
+                    "salary_run_rate": "₹0",
+                    "avg_monthly_salary": 0.0,
+                    "credits_count": 0,
+                    "credits_history": [],
+                    "employer_switch": False,
+                    "switch_notes": "Awaiting bank statement upload...",
+                    "stability_score": 0,
+                    "stability_tier": "Awaiting Ingestion"
+                },
+                "debt_and_emi": {
+                    "monthly_obligations": 0.0,
+                    "active_lenders": [],
+                    "lenders_count": 0,
+                    "jumbo_loans_disbursed": 0.0,
+                    "jumbo_loans_list": [],
+                    "foir_percentage": 0.0,
+                    "total_emi_paid": 0.0
+                },
+                "cc_stress": {
+                    "is_alert": False,
+                    "severity": "NORMAL",
+                    "message": "No statement loaded. Ingest statements to evaluate credit card stress.",
+                    "jumbo_disbursed": 0.0,
+                    "card_debt_settled": 0.0
+                },
+                "stock_and_mf": {
+                    "total_trading_flow": 0.0,
+                    "total_inflows": 0.0,
+                    "total_outflows": 0.0,
+                    "angel_one_inflows": 0.0,
+                    "iccl_sip_outflows": 0.0,
+                    "nse_bse_settlements": 0.0,
+                    "txns_count": 0
+                },
+                "cc_and_wallet_churn": {
+                    "total_churn_volume": 0.0,
+                    "cred_inflows": 0.0,
+                    "cred_outflows": 0.0,
+                    "net_cred_rotation": 0.0,
+                    "cc_payments_total": 0.0,
+                    "wallet_topups_total": 0.0,
+                    "txns_count": 0
+                },
+                "bounce_audit": {
+                    "bounce_count": 0,
+                    "is_clean": True,
+                    "status_text": "0 Bounces • Clean Record",
+                    "tag_color": "emerald",
+                    "bounces_list": []
+                },
+                "abb_metrics": {
+                    "overall_abb": 0.0,
+                    "monthly_abb": {},
+                    "min_balance": 0.0,
+                    "max_balance": 0.0,
+                    "days_tracked": 0
+                }
+            },
+            "tab_counts": {
+                "all": 0,
+                "salary": 0,
+                "loans": 0,
+                "trading": 0,
+                "churn": 0,
+                "bounce": 0
+            },
+            "chart_cashflow": {"labels": [], "inflows": [], "outflows": [], "net": []},
+            "chart_categories": {"labels": [], "values": [], "counts": {}},
+            "chart_balance": [],
+            "total_transactions": 0
+        }
+        
+    if len(stmts) == 1:
+        meta = stmts[0]
+    else:
+        meta = {
+            "bank": "Consolidated Portfolio",
+            "borrower_name": "Multi-Borrower Portfolio",
+            "account_no": "Combined Accounts",
+            "branch": "Multi-Branch",
+            "sol_id": "—",
+            "ifsc": "Multi-IFSC",
+            "cust_id": "—",
+            "email": "—",
+            "mobile": "—",
+            "account_type": "Combined Savings & Salary Portfolio",
+            "period": "Consolidated Period",
+            "opening_balance": sum(s.get('opening_balance', 0.0) for s in stmts),
+            "closing_balance": sum(s.get('closing_balance', 0.0) for s in stmts),
+            "total_withdrawals": sum(s.get('total_withdrawals', 0.0) for s in stmts),
+            "total_deposits": sum(s.get('total_deposits', 0.0) for s in stmts)
+        }
+        
+    insights = compute_underwriting_insights(txns, meta)
+    
+    df = pd.DataFrame(txns)
+    df['month'] = df['iso_date'].str[:7]
+    monthly = df.groupby('month')[['credit', 'debit']].sum().reset_index()
+    monthly = monthly[monthly['month'].str.len() == 7].sort_values('month')
+    monthly['net'] = monthly['credit'] - monthly['debit']
+    
+    cat_summary = df.groupby('category')[['debit', 'credit']].sum().reset_index()
+    cat_counts = df['category'].value_counts().to_dict()
+    
+    df_sorted = df.sort_values(['iso_date', 'id'])
     step = max(1, len(df_sorted) // 40)
-    sampled_balance = df_sorted.iloc[::step][["txn_date", "iso_date", "balance", "bank"]].to_dict("records")
+    sampled_balance = df_sorted.iloc[::step][['txn_date', 'iso_date', 'balance', 'bank']].to_dict('records')
+    
+    # Backward compatible with frontend tab 'churn' while capturing both CC_PAYMENT and WALLET_TOPUP
     tab_counts = {
-        "all": len(records),
-        "salary": int(df["category"].astype(str).str.contains("SALARY|BUSINESS_INFLOW", case=False, na=False).sum()),
-        "loans": int(df["category"].astype(str).str.contains("LOAN|EMI", case=False, na=False).sum()),
-        "trading": int(df["category"].astype(str).str.contains("STOCK|TRADING", case=False, na=False).sum()),
-        "churn": int(df["category"].astype(str).str.contains("CC_PAYMENT|WALLET_TOPUP|CC_WALLET_CHURN", case=False, na=False).sum()),
-        "bounce": int(df["category"].astype(str).str.contains("BOUNCE", case=False, na=False).sum()),
+        "all": len(txns),
+        "salary": int(df['category'].str.contains('SALARY|BUSINESS_INFLOW', na=False).sum()),
+        "loans": int(df['category'].str.contains('LOAN|EMI', na=False).sum()),
+        "trading": int(df['category'].str.contains('STOCK|TRADING', na=False).sum()),
+        "churn": int(df['category'].str.contains('CC_PAYMENT|WALLET_TOPUP|CC_WALLET_CHURN', na=False).sum()),
+        "bounce": int(df['category'].str.contains('BOUNCE', na=False).sum())
     }
-    statement_summary = [{
-        "bank": metadata.get("bank"), "borrower_name": metadata.get("borrower_name"),
-        "account_no": metadata.get("account_no"), "abb": insights.get("abb_metrics", {}).get("overall_abb", 0),
-        "closing_balance": metadata.get("closing_balance", 0), "filename": filename,
-    }]
+    
     return {
-        "is_empty": False, "selected_bank": bank or "All", "available_statements": statement_summary,
-        "insights": insights, "tab_counts": tab_counts,
+        "is_empty": False,
+        "selected_bank": bank or "All",
+        "available_statements": all_stmts,
+        "insights": insights,
+        "tab_counts": tab_counts,
         "chart_cashflow": {
-            "labels": monthly["month"].tolist(),
-            "inflows": [round(float(v), 2) for v in monthly["credit"].tolist()],
-            "outflows": [round(float(v), 2) for v in monthly["debit"].tolist()],
-            "net": [round(float(v), 2) for v in monthly["net"].tolist()],
+            "labels": monthly['month'].tolist(),
+            "inflows": [round(float(v), 2) for v in monthly['credit'].tolist()],
+            "outflows": [round(float(v), 2) for v in monthly['debit'].tolist()],
+            "net": [round(float(v), 2) for v in monthly['net'].tolist()]
         },
         "chart_categories": {
-            "labels": cat_summary["category"].tolist(),
-            "values": [round(float(d + c), 2) for d, c in zip(cat_summary["debit"].tolist(), cat_summary["credit"].tolist())],
-            "counts": df["category"].value_counts().to_dict(),
+            "labels": cat_summary['category'].tolist(),
+            "values": [round(float(v), 2) for v in cat_summary['debit'].tolist()],
+            "counts": cat_counts
         },
-        "chart_balance": sampled_balance, "total_transactions": len(records),
+        "chart_balance": sampled_balance
     }
-
 
 @app.get("/api/transactions")
 def get_transactions(
-    request: Request, response: Response,
-    bank: Optional[str] = None, tab: str = "all", search: Optional[str] = None,
-    start_date: Optional[str] = None, end_date: Optional[str] = None,
-    category: Optional[str] = None, min_amount: Optional[float] = None,
+    bank: Optional[str] = None,
+    tab: str = "all",
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    category: Optional[str] = None,
+    min_amount: Optional[float] = None,
     max_amount: Optional[float] = None,
-    sort_by: str = "iso_date", sort_dir: str = "desc",
-    page: int = Query(1, ge=1), limit: int = Query(50, ge=1, le=500),
+    sort_by: str = "iso_date",
+    sort_dir: str = "desc",
+    page: int = 1,
+    limit: int = 50
 ):
-    sid = _session_id(request, response)
-    snap = _snapshot(sid)
-    if not snap:
-        return {"transactions": [], "total": 0, "page": page, "limit": limit, "total_pages": 1}
-    metadata, records, _, _ = snap
-    if bank and bank.lower() != "all" and bank not in (metadata.get("bank"), metadata.get("account_no")):
-        records = []
-    rows = list(records)
-    category_text = lambda r: str(r.get("category") or "").upper()
-    if tab == "salary": rows = [r for r in rows if "SALARY" in category_text(r) or "BUSINESS_INFLOW" in category_text(r)]
-    elif tab == "loans": rows = [r for r in rows if "LOAN" in category_text(r) or "EMI" in category_text(r)]
-    elif tab == "trading": rows = [r for r in rows if "STOCK" in category_text(r) or "TRADING" in category_text(r)]
-    elif tab in ("churn", "credit_cards", "wallets"): rows = [r for r in rows if any(k in category_text(r) for k in ("CC_PAYMENT", "WALLET_TOPUP", "CC_WALLET_CHURN"))]
-    elif tab == "bounce": rows = [r for r in rows if "BOUNCE" in category_text(r)]
-    if category and category.lower() != "all": rows = [r for r in rows if r.get("category") == category]
+    conn = get_db_conn()
+    c = conn.cursor()
+    
+    where_clauses = []
+    params = []
+    
+    if bank and str(bank).lower() != 'all':
+        where_clauses.append("(bank = ? OR account_no = ?)")
+        params.extend([bank, bank])
+        
+    if tab == "salary":
+        where_clauses.append("(category LIKE '%SALARY%' OR category LIKE '%BUSINESS_INFLOW%')")
+    elif tab == "loans":
+        where_clauses.append("(category LIKE '%LOAN%' OR category LIKE '%EMI%')")
+    elif tab == "trading":
+        where_clauses.append("(category LIKE '%STOCK%' OR category LIKE '%TRADING%')")
+    elif tab in ("churn", "credit_cards", "wallets"):
+        where_clauses.append("(category LIKE '%CC_PAYMENT%' OR category LIKE '%WALLET_TOPUP%' OR category LIKE '%CC_WALLET_CHURN%')")
+    elif tab == "bounce":
+        where_clauses.append("category LIKE '%BOUNCE%'")
+        
+    if category and str(category).lower() != 'all':
+        where_clauses.append("category = ?")
+        params.append(category)
+        
     if search:
-        needle = search.strip().casefold()
-        rows = [r for r in rows if needle in str(r.get("narration", "")).casefold() or needle in str(r.get("txn_date", "")).casefold() or needle in str(r.get("bank", "")).casefold()]
-    if start_date: rows = [r for r in rows if str(r.get("iso_date", "")) >= start_date]
-    if end_date: rows = [r for r in rows if str(r.get("iso_date", "")) <= end_date]
-    if min_amount is not None: rows = [r for r in rows if max(float(r.get("debit") or 0), float(r.get("credit") or 0)) >= min_amount]
-    if max_amount is not None: rows = [r for r in rows if max(float(r.get("debit") or 0), float(r.get("credit") or 0)) <= max_amount]
+        search_term = f"%{search.strip()}%"
+        where_clauses.append("(narration LIKE ? OR txn_date LIKE ? OR bank LIKE ?)")
+        params.extend([search_term, search_term, search_term])
+        
+    if start_date:
+        where_clauses.append("iso_date >= ?")
+        params.append(start_date)
+        
+    if end_date:
+        where_clauses.append("iso_date <= ?")
+        params.append(end_date)
+        
+    if min_amount is not None:
+        where_clauses.append("(debit >= ? OR credit >= ?)")
+        params.extend([min_amount, min_amount])
+        
+    if max_amount is not None:
+        where_clauses.append("(debit <= ? OR credit <= ?)")
+        params.extend([max_amount, max_amount])
+        
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    c.execute(f"SELECT COUNT(*) FROM transactions {where_sql}", params)
+    total_records = c.fetchone()[0]
+    
     valid_sorts = {"iso_date", "debit", "credit", "balance", "txn_date"}
-    sort_col = sort_by if sort_by in valid_sorts else "iso_date"
-    rows.sort(key=lambda r: (r.get(sort_col) or "", r.get("txn_date") or ""), reverse=(sort_dir.lower() != "asc"))
-    total = len(rows)
-    total_pages = max(1, (total + limit - 1) // limit)
-    start = (page - 1) * limit
-    return {"transactions": rows[start:start + limit], "total": total, "page": page, "limit": limit, "total_pages": total_pages}
-
+    sort_column = sort_by if sort_by in valid_sorts else "iso_date"
+    direction = "ASC" if sort_dir.lower() == "asc" else "DESC"
+    
+    offset = (page - 1) * limit
+    order_sql = f"ORDER BY {sort_column} {direction}, id {direction}"
+    query_sql = f"SELECT * FROM transactions {where_sql} {order_sql} LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    
+    c.execute(query_sql, params)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    
+    total_pages = (total_records + limit - 1) // limit if total_records > 0 else 1
+    return {
+        "transactions": rows,
+        "total": total_records,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages
+    }
 
 @app.post("/api/reset")
-def reset_session(request: Request, response: Response):
-    sid = _session_id(request, response)
-    _clear_statement(sid)
-    return {"success": True, "message": "Your current in-memory statement was cleared."}
-
+def reset_session():
+    clear_db()
+    return {"success": True, "message": "Session reset successfully."}
 
 @app.post("/api/upload")
-async def upload_statement(request: Request, response: Response, file: UploadFile = File(...), password: Optional[str] = Form(None)):
-    sid = _session_id(request, response)
-    filename = file.filename or "bank_statement.pdf"
-    content = await file.read()
+async def upload_statement(
+    file: Optional[UploadFile] = File(None),
+    files: Optional[list[UploadFile]] = File(None),
+    password: Optional[str] = Form(None)
+):
+    uploaded_files = []
+    
+    if files:
+        uploaded_files.extend(files)
+    if file:
+        uploaded_files.append(file)
+        
+    if not uploaded_files:
+        raise HTTPException(status_code=400, detail="No PDF file was provided.")
+        
     try:
-        detection, records, metadata, insights = await run_in_threadpool(_parse_statement, content, password, filename)
-        _store_statement(sid, metadata, records, insights, filename)
+        ingested_statements = []
+        failed_info = []
+        total_parsed_rows = 0
+        
+        for upload_item in uploaded_files:
+            content = await upload_item.read()
+            filename = upload_item.filename
+            
+            detection = detect_bank_format(file_bytes=content, password=password)
+            if detection.get("is_encrypted") and not password:
+                return {
+                    "success": False,
+                    "needs_password": True,
+                    "detected_bank": detection.get("detected_bank", "Protected Statement"),
+                    "filename": filename,
+                    "message": f"'{filename}' is password protected. Please enter password."
+                }
+            elif detection.get("is_encrypted") and detection.get("auth_failed"):
+                return {
+                    "success": False,
+                    "needs_password": True,
+                    "detected_bank": detection.get("detected_bank", "Protected Statement"),
+                    "filename": filename,
+                    "error": f"Incorrect password for '{filename}'."
+                }
+                
+            bank_name = detection.get("detected_bank", "Generic")
+            
+            if "UCO" in bank_name:
+                records, metadata = parse_uco_bank_pdf(content, password=password)
+            elif "Federal" in bank_name:
+                records, metadata = parse_federal_pdf(content, password=password)
+            elif "SBI" in bank_name or "STATE BANK" in bank_name:
+                records, metadata = parse_sbi_pdf(content, password=password)
+            elif "Axis" in bank_name:
+                records, metadata = parse_axis_pdf(content, password=password)
+            elif "HDFC" in bank_name:
+                records, metadata = parse_hdfc_pdf(content, password=password)
+            elif "IDFC" in bank_name:
+                records, metadata = parse_idfc_pdf(content, password=password)
+            elif "ICICI" in bank_name:
+                records, metadata = parse_icici_pdf(content, password=password)
+            elif "Standard Chartered" in bank_name:
+                records, metadata = parse_standard_chartered_pdf(content, password=password)
+            else:
+                records, metadata = parse_universal_pdf(content, password=password, detected_bank=bank_name)
+
+            if not records:
+                records, metadata = parse_universal_pdf(content, password=password, detected_bank=bank_name)
+
+            if not records:
+                diag = diagnose_pdf(content, password=password)
+                print(f"[UPLOAD] no rows parsed from '{filename}' | bank={bank_name} | diag={diag}", flush=True)
+                failed_info.append({"file": filename, "bank": bank_name, **diag})
+                continue
+                
+            records = tag_recurring_salary(records)
+            records = auto_categorize_with_ai(records)
+            insights = compute_underwriting_insights(records, metadata)
+            save_statement_to_db(records, metadata, insights, filename=filename)
+            
+            total_parsed_rows += len(records)
+            ingested_statements.append({
+                "bank": metadata.get("bank"),
+                "borrower_name": metadata.get("borrower_name"),
+                "account_no": metadata.get("account_no"),
+                "transactions_parsed": len(records),
+                "reconciled": insights.get("reconciliation", {}).get("is_reconciled", True),
+                "layout_detected": detection.get("layout", "Auto-Detect")
+            })
+            
+        if not ingested_statements:
+            hint = ""
+            if failed_info:
+                f0 = failed_info[0]
+                if f0.get("looks_scanned"):
+                    hint = " (PDF scanned image format detected - requires OCR)"
+                else:
+                    hint = f" [bank detected: {f0.get('bank')}, pages: {f0.get('pages')}]"
+            raise HTTPException(status_code=400, detail="Could not extract tabular transactions from uploaded statement." + hint)
+            
         return {
-            "success": True, "bank": metadata.get("bank"),
-            "borrower_name": metadata.get("borrower_name"),
-            "transactions_parsed": len(records), "total_parsed": len(records),
-            "reconciled": insights.get("reconciliation", {}).get("is_reconciled", False),
-            "reconciliation": insights.get("reconciliation", {}),
-            "layout_detected": detection.get("layout", "Auto-Detect"),
+            "success": True,
+            "statements": ingested_statements,
+            "total_parsed": total_parsed_rows,
+            "bank": ingested_statements[0]["bank"] if len(ingested_statements) == 1 else "Consolidated",
+            "borrower_name": ingested_statements[0]["borrower_name"] if len(ingested_statements) == 1 else "Multi-Borrower",
+            "transactions_parsed": total_parsed_rows
         }
-    except PermissionError as exc:
-        return {"success": False, "needs_password": True, "detected_bank": "Protected Statement", "filename": filename, "message": str(exc)}
-    except ValueError as exc:
-        message = str(exc)
-        if "Incorrect PDF password" in message:
-            return {"success": False, "needs_password": True, "detected_bank": "Protected Statement", "filename": filename, "error": message}
-        raise HTTPException(status_code=422, detail=message)
-    except Exception as exc:
+        
+    except HTTPException:
+        raise
+    except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Statement processing failed. Please try again or use another PDF.") from exc
-    finally:
-        await file.close()
-
-
-def _export_snapshot(bank: Optional[str], sid: str):
-    snap = _snapshot(sid)
-    if not snap:
-        raise HTTPException(status_code=404, detail="No statement available. Upload a PDF first.")
-    metadata, records, insights, filename = snap
-    if bank and bank.lower() != "all" and bank not in (metadata.get("bank"), metadata.get("account_no")):
-        raise HTTPException(status_code=404, detail="Requested statement is not available.")
-    return metadata, records, insights, filename
-
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 @app.get("/api/export/excel")
-def export_excel(request: Request, response: Response, bank: Optional[str] = None):
-    sid = _session_id(request, response)
-    metadata, records, insights, filename = _export_snapshot(bank, sid)
-    stream = create_excel_report(insights, records, bank_filter=metadata.get("bank", "Statement"))
-    out_name = re.sub(r"[^A-Za-z0-9_-]+", "_", os.path.splitext(filename)[0]) or "Bank_Statement"
-    return Response(content=stream.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{out_name}_Analysis.xlsx"'})
-
+def export_excel(bank: Optional[str] = None):
+    conn = get_db_conn()
+    c = conn.cursor()
+    
+    if bank and str(bank).lower() != 'all':
+        c.execute("SELECT * FROM statements WHERE bank = ? OR account_no = ?", (bank, bank))
+        stmts = [dict(r) for r in c.fetchall()]
+        c.execute("SELECT * FROM transactions WHERE bank = ? OR account_no = ? ORDER BY iso_date DESC, id DESC", (bank, bank))
+        txns = [dict(r) for r in c.fetchall()]
+    else:
+        c.execute("SELECT * FROM statements ORDER BY id ASC")
+        stmts = [dict(r) for r in c.fetchall()]
+        c.execute("SELECT * FROM transactions ORDER BY iso_date DESC, id DESC")
+        txns = [dict(r) for r in c.fetchall()]
+    conn.close()
+    
+    if not txns:
+        raise HTTPException(status_code=404, detail="No transactions found to export")
+        
+    if len(stmts) == 1:
+        meta = stmts[0]
+    else:
+        meta = {
+            "bank": "Consolidated Portfolio",
+            "borrower_name": "Multi-Borrower Portfolio",
+            "account_no": "Combined Accounts",
+            "branch": "Multi-Branch",
+            "sol_id": "—",
+            "ifsc": "Multi-IFSC",
+            "cust_id": "—",
+            "email": "—",
+            "mobile": "—",
+            "account_type": "Combined Savings & Salary Portfolio",
+            "period": "Consolidated Period",
+            "opening_balance": sum(s.get('opening_balance', 0.0) for s in stmts),
+            "closing_balance": sum(s.get('closing_balance', 0.0) for s in stmts),
+            "total_withdrawals": sum(s.get('total_withdrawals', 0.0) for s in stmts),
+            "total_deposits": sum(s.get('total_deposits', 0.0) for s in stmts)
+        }
+        
+    insights = compute_underwriting_insights(txns, meta)
+    excel_stream = create_excel_report(insights, txns, bank_filter=bank or "All Statements")
+    filename = f"FinTech_Underwriting_Statement_{bank or 'Consolidated'}.xlsx".replace(" ", "_")
+    return Response(
+        content=excel_stream.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 @app.get("/api/export/json")
-def export_json(request: Request, response: Response, bank: Optional[str] = None):
-    sid = _session_id(request, response)
-    metadata, records, insights, filename = _export_snapshot(bank, sid)
-    payload = create_los_json(insights, records, bank_filter=metadata.get("bank", "Statement"))
-    out_name = re.sub(r"[^A-Za-z0-9_-]+", "_", os.path.splitext(filename)[0]) or "Bank_Statement"
-    return Response(content=payload, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{out_name}_LOS.json"'})
-
+def export_json(bank: Optional[str] = None):
+    conn = get_db_conn()
+    c = conn.cursor()
+    
+    if bank and str(bank).lower() != 'all':
+        c.execute("SELECT * FROM statements WHERE bank = ? OR account_no = ?", (bank, bank))
+        stmts = [dict(r) for r in c.fetchall()]
+        c.execute("SELECT * FROM transactions WHERE bank = ? OR account_no = ? ORDER BY iso_date DESC, id DESC", (bank, bank))
+        txns = [dict(r) for r in c.fetchall()]
+    else:
+        c.execute("SELECT * FROM statements ORDER BY id ASC")
+        stmts = [dict(r) for r in c.fetchall()]
+        c.execute("SELECT * FROM transactions ORDER BY iso_date DESC, id DESC")
+        txns = [dict(r) for r in c.fetchall()]
+    conn.close()
+    
+    if not txns:
+        raise HTTPException(status_code=404, detail="No transactions found to export")
+        
+    if len(stmts) == 1:
+        meta = stmts[0]
+    else:
+        meta = {
+            "bank": "Consolidated Portfolio",
+            "borrower_name": "Multi-Borrower Portfolio",
+            "account_no": "Combined Accounts",
+            "branch": "Multi-Branch",
+            "sol_id": "—",
+            "ifsc": "Multi-IFSC",
+            "cust_id": "—",
+            "email": "—",
+            "mobile": "—",
+            "account_type": "Combined Savings & Salary Portfolio",
+            "period": "Consolidated Period",
+            "opening_balance": sum(s.get('opening_balance', 0.0) for s in stmts),
+            "closing_balance": sum(s.get('closing_balance', 0.0) for s in stmts),
+            "total_withdrawals": sum(s.get('total_withdrawals', 0.0) for s in stmts),
+            "total_deposits": sum(s.get('total_deposits', 0.0) for s in stmts)
+        }
+        
+    insights = compute_underwriting_insights(txns, meta)
+    json_str = create_los_json(insights, txns, bank_filter=bank or "All Statements")
+    filename = f"LOS_Origination_Payload_{bank or 'Consolidated'}.json".replace(" ", "_")
+    return Response(
+        content=json_str,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 @app.get("/", response_class=HTMLResponse)
 def index_page():
-    candidates = [os.path.join(TEMPLATES_DIR, "index.html"), os.path.join(BASE_DIR, "index.html")]
-    for index_path in candidates:
-        if os.path.isfile(index_path):
-            with open(index_path, "r", encoding="utf-8") as handle:
-                return handle.read()
-    return HTMLResponse("<h1>FinTech Bank Statement Analyzer</h1>", status_code=200)
-
+    index_path = os.path.join(TEMPLATES_DIR, "index.html")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return "<h1>FinTech Bank Statement Analyzer</h1>"
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", 8000)))
+    import argparse
+
+    parser = argparse.ArgumentParser(description="FinTech Bank Statement Analyzer Server")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)), help="Port to run server on")
+    parser.add_argument("--host", type=str, default=os.environ.get("HOST", "0.0.0.0"), help="Host to listen on")
+    parser.add_argument("--reload", action="store_true", default=False, help="Enable auto-reload")
+    args, unknown = parser.parse_known_args()
+
+    if unknown and unknown[0].isdigit():
+        args.port = int(unknown[0])
+
+    print(f"\n=======================================================", flush=True)
+    print(f"🚀 FinTech Analyzer Server starting on http://{args.host}:{args.port}", flush=True)
+    print(f"📂 Open your browser at: http://{args.host}:{args.port}", flush=True)
+    print(f"=======================================================\n", flush=True)
+
+    if args.reload:
+        uvicorn.run("server:app", host=args.host, port=args.port, reload=True, reload_excludes=["venv", ".git", "__pycache__"])
+    else:
+        uvicorn.run(app, host=args.host, port=args.port)
