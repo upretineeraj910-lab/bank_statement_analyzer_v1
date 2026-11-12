@@ -15,6 +15,7 @@ import pandas as pd
 from analyzer_engine import (
     detect_bank_format,
     parse_federal_pdf,
+    parse_uco_bank_pdf,
     parse_hdfc_pdf,
     parse_axis_pdf,
     parse_idfc_pdf,
@@ -36,7 +37,9 @@ def parse_any(path, password=None):
         raise ValueError(f"{path}: password protected / wrong password")
     bank = det.get("detected_bank", "Generic")
 
-    if "Federal" in bank:
+    if "UCO" in bank:
+        recs, meta = parse_uco_bank_pdf(content, password=password)
+    elif "Federal" in bank:
         recs, meta = parse_federal_pdf(content, password=password)
     elif "SBI" in bank:
         recs, meta = parse_sbi_pdf(content, password=password)
