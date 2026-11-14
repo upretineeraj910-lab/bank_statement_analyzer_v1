@@ -28,13 +28,18 @@ from analyzer_engine import (
     parse_idfc_pdf,
     parse_sbi_pdf,
     parse_icici_pdf,
+    parse_canara_pdf,
     parse_standard_chartered_pdf,
     parse_universal_pdf,
     compute_underwriting_insights,
     save_statement_to_db,
     tag_recurring_salary,
     auto_categorize_with_ai,
-    clean_amount
+    clean_amount,
+    parse_canara_pdf,
+    parse_bob_pdf,
+    parse_pnb_pdf,
+    parse_kotak_pdf,
 )
 from export_service import create_excel_report, create_los_json
 
@@ -259,7 +264,6 @@ def get_dashboard(bank: Optional[str] = None):
     step = max(1, len(df_sorted) // 40)
     sampled_balance = df_sorted.iloc[::step][['txn_date', 'iso_date', 'balance', 'bank']].to_dict('records')
     
-    # Backward compatible with frontend tab 'churn' while capturing both CC_PAYMENT and WALLET_TOPUP
     tab_counts = {
         "all": len(txns),
         "salary": int(df['category'].str.contains('SALARY|BUSINESS_INFLOW', na=False).sum()),
@@ -440,10 +444,19 @@ async def upload_statement(
                 records, metadata = parse_idfc_pdf(content, password=password)
             elif "ICICI" in bank_name:
                 records, metadata = parse_icici_pdf(content, password=password)
+            elif "Canara" in bank_name:
+                records, metadata = parse_canara_pdf(content, password=password)
+            elif "Baroda" in bank_name:
+                records, metadata = parse_bob_pdf(content, password=password)
+            elif "Punjab National" in bank_name or "PNB" in bank_name:
+                records, metadata = parse_pnb_pdf(content, password=password)
             elif "Standard Chartered" in bank_name:
                 records, metadata = parse_standard_chartered_pdf(content, password=password)
+            elif "Kotak" in bank_name:
+                records, metadata = parse_kotak_pdf(content, password=password)
             else:
                 records, metadata = parse_universal_pdf(content, password=password, detected_bank=bank_name)
+            
 
             if not records:
                 records, metadata = parse_universal_pdf(content, password=password, detected_bank=bank_name)
@@ -537,7 +550,7 @@ def export_excel(bank: Optional[str] = None):
         
     insights = compute_underwriting_insights(txns, meta)
     excel_stream = create_excel_report(insights, txns, bank_filter=bank or "All Statements")
-    filename = f"FinTech_Underwriting_Statement_{bank or 'Consolidated'}.xlsx".replace(" ", "_")
+    filename = f"LoanSaarthi_Underwriting_Statement_{bank or 'Consolidated'}.xlsx".replace(" ", "_")
     return Response(
         content=excel_stream.getvalue(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
